@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TTD Special Entry Darshan Booking Assistant v6 - HTML DOM mapped
+TTD Special Entry Darshan Booking Assistant v13 - HTML DOM mapped
 
 Targets the form structure shown in the supplied TTD screenshot.
 
@@ -551,151 +551,280 @@ def choose_booking_date(page, booking):
 
 
 def slot_card_candidates(page):
+    """Discover slot cards across TTD Screen-1 variants.
+
+    Supported variants include:
+      1. Standard slots: ``Slot Time 8:00 am`` with a numeric button value.
+      2. Older/Seva slots: a named seva followed by ``(11:00 AM)`` and a
+         radio-style selection control.
+
+    Availability count is authoritative for ranking.  Status colour is used
+    only as a safety signal for clearly blocked cards.
     """
-    Discover the actual TTD slot cards from #scrollSlotType.
-
-    The live TTD DOM exposes each slot as an outer div with cursor:pointer.
-    Each card contains an availability block, seva name/time, ticket count,
-    price, and a radio button.
-    """
-    root = page.locator("#scrollSlotType:visible")
-    if not root.count():
-        return []
-
-    time_re = re.compile(r"\(\s*(\d{1,2}:\d{2}\s*[AP]M)\s*\)", re.I)
-    cards = root.locator("div[style*='cursor: pointer']")
-
-    results = []
+    candidates = []
     seen = set()
 
-    for i in range(cards.count()):
-        card = cards.nth(i)
+    time_pattern = re.compile(
+        r'(?:slot\s*time\s+)?(\d{1,2}:\d{2}\s*[ap]m)', re.I
+    )
+
+    # Find visible text elements that contain a clock time. This covers both
+    # "Slot Time 8:00 am" and named Seva cards such as
+    # "Kalyana Kankanam (11:00 AM)".
+    time_nodes = page.locator("*:visible").filter(has_text=time_pattern)
+
+    for i in range(time_nodes.count()):
+        node = time_nodes.nth(i)
+        try:
+            raw = norm(node.inner_text())
+        except Exception:
+            continue
+
+        matches = list(time_pattern.finditer(raw))
+        if not matches:
+            continue
+
+        # A parent can contain multiple cards. Use the first clock time only
+        # when the element itself is reasonably compact; otherwise skip it and
+        # let its child time element be discovered.
+        m = matches[0]
+        slot_time = normalize_time_text(m.group(1))
+        if not slot_time:
+            continue
+
+        card = None
+        for level in range(1, 9):
+            try:
+                ancestor = node.locator("xpath=" + "/.." * level)
+                if not ancestor.count():
+                    continue
+                txt = norm(ancestor.inner_text())
+                if not time_pattern.search(txt):
+                    continue
+
+                controls = ancestor.locator(
+                    "button:visible, input[type='radio']:visible, "
+                    "input[type='button']:visible, [role='radio']:visible"
+                )
+                if not controls.count():
+                    continue
+
+                # A genuine slot card should also expose availability or quota
+                # text. This prevents the large page-level container from
+                # becoming the selected card.
+                if not re.search(
+                    r'\bavailable\b|quota\s+is\s+full|quota\s+not\s+released|'
+                    r'slot\s+not\s+available',
+                    txt,
+                    re.I,
+                ):
+                    continue
+
+                card = ancestor
+                # Stop at the first compact card containing one clock time.
+                # If this ancestor contains multiple distinct times, keep
+                # walking until a child-sized card is found.
+                distinct_times = {
+                    normalize_time_text(x.group(1))
+                    for x in time_pattern.finditer(txt)
+                }
+                if len(distinct_times) <= 1:
+                    break
+            except Exception:
+                continue
+
+        if card is None:
+            continue
 
         try:
             txt = norm(card.inner_text())
         except Exception:
             continue
 
-        time_match = time_re.search(txt)
-        if not time_match:
+        # Avoid duplicate discovery from nested visible elements.
+        card_times = {
+            normalize_time_text(x.group(1))
+            for x in time_pattern.finditer(txt)
+        }
+        if len(card_times) != 1 or slot_time not in card_times:
             continue
 
-        slot_time = normalize_time_text(time_match.group(1))
+        # Determine whether this is the standard unnamed slot form or the
+        # older named-Seva form.
+        is_named_seva = not bool(re.search(r'\bslot\s*time\b', txt, re.I))
 
-        available_text = ""
-        availability_color = ""
-
+        control = None
         try:
-            blocks = card.locator("div")
-            for bi in range(min(blocks.count(), 12)):
-                block = blocks.nth(bi)
-                btxt = norm(block.inner_text())
-
-                if re.search(
-                    r"\bavailable\b|\bfilling\s+fast\b|\bquota\s+is\s+full\b|"
-                    r"\bquota\s+not\s+released\b|\bslot\s+not\s+available\b",
-                    btxt,
-                    re.I,
-                ):
-                    available_text = btxt
-                    try:
-                        availability_color = norm(
-                            block.evaluate("e => getComputedStyle(e).backgroundColor")
-                        )
-                    except Exception:
-                        pass
+            buttons = card.locator("button:visible")
+            for bi in range(buttons.count()):
+                b = buttons.nth(bi)
+                val = (b.get_attribute("value") or "").strip()
+                if re.fullmatch(r"\d{4}", val):
+                    control = b
                     break
+            if control is None and buttons.count():
+                control = buttons.last
         except Exception:
             pass
 
-        state_lower = available_text.lower()
+        if control is None:
+            try:
+                radios = card.locator("input[type='radio']:visible")
+                if radios.count():
+                    control = radios.first
+            except Exception:
+                pass
+
+        if control is None:
+            try:
+                role_radios = card.locator('[role="radio"]:visible')
+                if role_radios.count():
+                    control = role_radios.first
+            except Exception:
+                pass
+
+        if control is None:
+            continue
+
+        availability_text = ""
+        availability_color = ""
+        try:
+            block = card.locator(
+                "[class*='SlotBooking_availableSlotSection']:visible"
+            ).first
+            if block.count():
+                availability_text = norm(block.inner_text())
+                try:
+                    availability_color = norm(
+                        block.evaluate("e => getComputedStyle(e).backgroundColor")
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        if not availability_text:
+            # Older Seva markup does not necessarily have the newer generated
+            # SlotBooking class. The card text itself contains e.g. "47 Available".
+            availability_text = txt
+
+        state_lower = availability_text.lower()
+        count = availability_count(availability_text or txt)
+
+        blocked_colors = {
+            "rgb(232, 72, 60)",
+            "rgb(255, 30, 34)",
+            "rgb(255, 31, 38)",
+            "rgb(121, 192, 235)",
+            "rgb(5, 175, 232)",
+            "rgb(204, 204, 204)",
+        }
 
         blocked = (
             "quota is full" in state_lower
             or "quota not released" in state_lower
             or "slot not available" in state_lower
-            or availability_color in {
-                "rgb(255, 30, 34)",
-                "rgb(5, 175, 232)",
-                "rgb(204, 204, 204)",
-            }
+            or availability_color in blocked_colors
+            or count == 0
         )
 
         is_available = (
-            (
-                "available" in state_lower
-                and "not available" not in state_lower
-                and "not released" not in state_lower
-                and "quota is full" not in state_lower
-            )
-            or availability_color in {
-                "rgb(121, 193, 57)",
-                "rgb(255, 191, 0)",
-                "rgb(94, 184, 18)",
-            }
+            count is not None and count > 0
+        ) or (
+            "available" in state_lower
+            and "not available" not in state_lower
+            and "not released" not in state_lower
+            and "quota is full" not in state_lower
         )
+
+        # Seva cards explicitly state whether the card is for 1 or 2 persons.
+        # When that information exists, preserve it so choose_booking_slot can
+        # avoid selecting a 1-person Seva for a 2-pilgrim booking.
+        capacity = None
+        cap_match = re.search(
+            r'\b(\d+)\s*persons?\b',
+            txt,
+            re.I,
+        )
+        if cap_match:
+            try:
+                capacity = int(cap_match.group(1))
+            except ValueError:
+                capacity = None
+
+        if is_named_seva and capacity is not None:
+            # The actual ticket count is checked later in choose_booking_slot.
+            # Keep the card discoverable here.
+            pass
 
         try:
             cursor = norm(card.evaluate("e => getComputedStyle(e).cursor"))
         except Exception:
             cursor = ""
-
         if cursor == "not-allowed":
             blocked = True
             is_available = False
 
-        button = card.locator("button")
-        if button.count() == 0:
-            continue
-
-        try:
-            key = card.evaluate(
-                "e => e.outerHTML.replace(/\\s+/g, ' ').slice(0, 1800)"
-            )
-        except Exception:
-            key = f"{i}:{slot_time}:{txt[:250]}"
-
-        if key in seen:
-            continue
-        seen.add(key)
-
-        results.append({
+        item = {
             "locator": card,
+            "button": control,
             "text": txt,
             "time": slot_time,
             "minutes": parse_slot_time(slot_time),
-            "availability_text": available_text,
+            "availability_text": availability_text,
             "availability_color": availability_color,
-            "availability_count": availability_count(available_text or txt),
+            "availability_count": count,
+            "capacity": capacity,
+            "named_seva": is_named_seva,
             "available": bool(is_available and not blocked),
             "blocked": blocked,
-        })
+        }
 
-    unique = {}
-    for item in results:
-        key = (item["time"], item["text"][:300])
-        unique.setdefault(key, item)
+        # If the same time is discovered multiple times, prefer the smallest
+        # card / the one with a numeric availability count.
+        key = slot_time
+        if key not in seen:
+            seen.add(key)
+            candidates.append(item)
+        else:
+            for pos, existing in enumerate(candidates):
+                if existing["time"] == key:
+                    if (
+                        existing.get("availability_count") is None
+                        and count is not None
+                    ):
+                        candidates[pos] = item
+                    break
 
-    return list(unique.values())
+    return candidates
+
 
 def click_slot(page, slot):
-    """Click the selected TTD slot immediately; do not verify afterward."""
+    """Click a TTD slot using its actual selection control or card."""
+    control = slot.get("button")
     card = slot["locator"]
     try:
-        button = card.locator("button").last
-        if button.count():
-            button.click(force=True, timeout=1000)
+        if control is not None and control.count():
+            control.scroll_into_view_if_needed()
+            control.click(force=True, timeout=1500)
         else:
-            card.click(force=True, timeout=1000)
-        print(f"[OK] Slot click sent immediately: {slot['time']}")
+            card.scroll_into_view_if_needed()
+            card.click(force=True, timeout=1500)
+        print(f"[OK] Slot click sent: {slot['time']}")
         return True
     except Exception as exc:
-        print(
-            f"[SLOT] Slot click failed for {slot['time']}: "
-            f"{type(exc).__name__}: {exc}"
-        )
-        return False
-
+        # Some TTD versions attach the handler to the card rather than the
+        # radio/button. Try the card as a compatibility fallback.
+        try:
+            card.click(force=True, timeout=1500)
+            print(f"[OK] Slot card click sent: {slot['time']}")
+            return True
+        except Exception:
+            print(
+                f"[SLOT] Slot click failed for {slot['time']}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return False
 
 def total_pilgrim_count(data):
     """Return the number of pilgrims configured in pilgrims.json."""
@@ -713,34 +842,71 @@ def total_pilgrim_count(data):
 
 
 def set_ttd_ticket_count(page, ticket_count):
-    """Set TTD ticket count with no post-click verification."""
+    """Set Number of Tickets across current/older TTD Screen-1 markup."""
     ticket_count = int(ticket_count)
     if ticket_count < 1:
         print("[TICKETS] No pilgrims configured; cannot set ticket count.")
         return False
 
-    field = page.locator('input[name="noOfTickets"]:visible').first
-    if not field.count():
-        print("[TICKETS] TTD number-of-tickets field was not found; failing fast.")
-        return False
-
     wanted = str(ticket_count)
-    print(f"[TICKETS] Selecting {ticket_count} ticket(s) immediately.")
+    field = None
+
+    # Newer markup may expose a stable name.
+    try:
+        named = page.locator('input[name="noOfTickets"]:visible')
+        if named.count():
+            field = named.first
+    except Exception:
+        pass
+
+    # Older/current TTD markup shown in the live page has no useful name on the
+    # input. Find the visible input whose ancestor text contains "Number of
+    # Tickets". This avoids confusing it with pilgrim Age/ID inputs.
+    if field is None:
+        inputs = page.locator("input:visible")
+        for i in range(inputs.count()):
+            candidate = inputs.nth(i)
+            try:
+                sig = candidate.evaluate("e => e.outerHTML")
+                if "type=\"hidden\"" in sig.lower():
+                    continue
+            except Exception:
+                pass
+            for level in range(1, 6):
+                try:
+                    anc = candidate.locator("xpath=" + "/.." * level)
+                    if not anc.count():
+                        continue
+                    txt = norm(anc.inner_text())
+                    if "number of tickets" in txt:
+                        field = candidate
+                        break
+                except Exception:
+                    continue
+            if field is not None:
+                break
+
+    if field is None:
+        print("[TICKETS] Number of Tickets control was not found.")
+        snapshot(page, "ticket_control_not_found")
+        return False
 
     try:
-        field.click(force=True, timeout=1000)
+        field.scroll_into_view_if_needed()
+        field.click(force=True, timeout=1500)
     except Exception as exc:
-        print(f"[TICKETS] Could not open ticket dropdown: {type(exc).__name__}: {exc}")
+        print(f"[TICKETS] Could not open Number of Tickets: {type(exc).__name__}: {exc}")
         return False
 
-    # Prefer the actual TTD custom-dropdown option. No sleep and no verification.
-    selectors = [
-        "li.floatingDropdown_listItem__tU_5x:visible",
-        '[role="option"]:visible',
-    ]
+    # TTD has used li, role=option, buttons, and plain divs for this menu.
     candidates = []
     seen = set()
-
+    selectors = [
+        "li:visible",
+        '[role="option"]:visible',
+        "button:visible",
+        "div:visible",
+    ]
     for selector in selectors:
         try:
             loc = page.locator(selector)
@@ -750,37 +916,32 @@ def set_ttd_ticket_count(page, ticket_count):
                     label = norm(item.inner_text())
                 except Exception:
                     continue
-                if label and label not in seen:
-                    seen.add(label)
-                    candidates.append((label, item))
+                if label not in {wanted, wanted.zfill(2)}:
+                    continue
+                # Ignore large containers whose text happens to contain the
+                # number. Exact single-value text is required.
+                if label in seen:
+                    continue
+                seen.add(label)
+                candidates.append(item)
         except Exception:
             pass
 
-    exact = [
-        pair for pair in candidates
-        if pair[0] in (wanted, wanted.zfill(2))
-    ]
-    exact.sort(key=lambda pair: (0 if pair[0] == wanted.zfill(2) else 1))
-
-    if not exact:
-        print(
-            f"[TICKETS] Ticket option {wanted}/{wanted.zfill(2)} not visible; "
-            "failing fast."
-        )
+    if not candidates:
+        print(f"[TICKETS] Ticket option {wanted} was not visible after opening the control.")
+        snapshot(page, "ticket_options_not_detected")
         return False
 
-    option_label, option = exact[0]
+    # Prefer the smallest element whose text is exactly the requested number.
+    option = candidates[0]
     try:
-        option.click(force=True, timeout=1000)
-        print(f"[OK] Ticket option {option_label!r} clicked immediately.")
+        option.scroll_into_view_if_needed()
+        option.click(force=True, timeout=1500)
+        print(f"[OK] Number of Tickets selected: {wanted}")
         return True
     except Exception as exc:
-        print(
-            f"[TICKETS] Ticket option click failed: "
-            f"{type(exc).__name__}: {exc}"
-        )
+        print(f"[TICKETS] Ticket option click failed: {type(exc).__name__}: {exc}")
         return False
-
 
 def availability_count(text):
     """Extract a numeric availability count when TTD exposes one."""
@@ -817,7 +978,7 @@ def slot_priority(item, preferred=""):
     )
 
 
-def choose_booking_slot(page, booking):
+def choose_booking_slot(page, booking, ticket_count=None):
     """
     Select the slot with the HIGHEST reported availability.
 
@@ -836,7 +997,28 @@ def choose_booking_slot(page, booking):
         snapshot(page, "slot_cards_not_detected")
         return False, None
 
-    available = [item for item in slots if item["available"]]
+    # For older/named Seva cards, TTD explicitly exposes the supported person
+    # count (for example "1 Person" or "2 Persons"). Do not select a Seva
+    # that cannot accommodate the configured pilgrim count. Standard
+    # "Slot Time ..." cards do not use this capacity rule.
+    requested_tickets = int(ticket_count or 0)
+    available = []
+    for item in slots:
+        if not item["available"]:
+            continue
+        if (
+            requested_tickets > 0
+            and item.get("named_seva")
+            and item.get("capacity") is not None
+            and item["capacity"] < requested_tickets
+        ):
+            print(
+                f"[SLOT] Skipping {item['time']} - capacity "
+                f"{item['capacity']} < tickets {requested_tickets}"
+            )
+            continue
+        available.append(item)
+
     print("[SLOT] Live slot inventory:")
     for item in sorted(
         slots,
@@ -961,15 +1143,17 @@ def select_date_and_slot(page, booking, ticket_count):
     if not ok:
         return False
 
+    # TTD renders slot availability based on selected ticket count in some versions.
+    print(f"[TICKETS] Total pilgrims in config: {ticket_count}")
+    if not set_ttd_ticket_count(page, ticket_count):
+        print("[TICKETS] Could not set Number of Tickets safely.")
+        return False
+
     print(
         f"[SLOT] Checking available slots for "
-        f"{selected_date.strftime('%d/%m/%Y')} before setting tickets..."
+        f"{selected_date.strftime('%d/%m/%Y')} after setting tickets..."
     )
-
-    # IMPORTANT: slot availability is checked/selected FIRST.
-    # Fail fast: inspect the current live DOM once; do not wait/poll.
-    ok, selected_slot = choose_booking_slot(page, booking)
-
+    ok, selected_slot = choose_booking_slot(page, booking, ticket_count)
     if not ok:
         print("[SLOT] No selectable/available slot was found in the current live UI.")
         return False
@@ -978,12 +1162,6 @@ def select_date_and_slot(page, booking, ticket_count):
         f"[OK] Available slot selected: {selected_slot['time']} "
         f"for {selected_date.strftime('%d/%m/%Y')}"
     )
-
-    # Only after a valid slot is selected, set ticket count.
-    print(f"[TICKETS] Total pilgrims in config: {ticket_count}")
-    if not set_ttd_ticket_count(page, ticket_count):
-        print("[TICKETS] Could not set Number of Tickets safely.")
-        return False
 
     print(
         f"[OK] Screen 1 fields complete: "
@@ -1017,48 +1195,121 @@ def field_context(page, c):
         except Exception: pass
     return " ".join(parts)
 
-def find_fields(page, key):
-    """
-    Robust TTD field discovery.
+def _find_labeled_control(page, label):
+    """Find visible form controls by their own field-label wrapper.
 
-    Priority:
-    1. Exact TTD DOM name (input/select/textarea).
-    2. Exact id/name/placeholder/aria-label.
-    3. Existing label/context pattern fallback.
+    Older TTD builds are less consistent about the `name` attribute. In those
+    builds a broad field-context search can confuse Age with Photo ID Number
+    because both controls live inside the same Pilgrim Details row.
+
+    We therefore inspect the DOM hierarchy for the *smallest* ancestor that:
+      - contains the exact field label, and
+      - contains only a small number of form controls.
+
+    This keeps Age attached to the Age input, Name to Name, etc., even when
+    the old form has weak/missing semantic attributes.
     """
-    exact_names = {
+    wanted = norm(label)
+    controls = page.locator(
+        "input:visible, textarea:visible, select:visible, "
+        "[role='combobox']:visible, [contenteditable='true']:visible"
+    )
+    found = []
+
+    for i in range(controls.count()):
+        c = controls.nth(i)
+        try:
+            matched = c.evaluate(
+                """
+                (el, wanted) => {
+                    const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    let node = el;
+                    let best = null;
+                    let bestScore = -1;
+                    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+                        const text = norm(node.innerText || node.textContent || '');
+                        if (!text.includes(wanted)) continue;
+
+                        const fields = node.querySelectorAll(
+                            'input, textarea, select, [role="combobox"], [contenteditable="true"]'
+                        );
+                        const fieldCount = fields.length;
+
+                        // A field wrapper normally contains one control. Allow
+                        // up to three for older custom TTD wrappers.
+                        if (fieldCount < 1 || fieldCount > 3) continue;
+
+                        // Prefer the deepest/smallest matching wrapper.
+                        const score = (100 - depth * 10) - fieldCount;
+                        if (score > bestScore) {
+                            best = true;
+                            bestScore = score;
+                        }
+                    }
+                    return !!best;
+                }
+                """,
+                wanted,
+            )
+            if matched:
+                found.append(c)
+        except Exception:
+            pass
+
+    return found
+
+
+def _find_pilgrim_fields_by_label(page, key):
+    labels = {
         "name": "name",
         "age": "age",
         "gender": "gender",
-        "id_type": "idType",
-        "id_number": "idNumber",
-        "email": "pilgrimEmail",
-        "city": "pilgrimCity",
-        "state": "pilgrimState",
-        "country": "pilgrimCountry",
-        "pincode": "pilgrimPincode",
+        "id_type": "photo id proof",
+        "id_number": "photo id number",
+    }
+    label = labels.get(key)
+    if not label:
+        return []
+    return _find_labeled_control(page, label)
+
+
+def find_fields(page, key):
+    """Find TTD fields across old and new Screen-2 implementations.
+
+    Strategy for pilgrim fields:
+      1. Exact semantic DOM names from either known TTD form.
+      2. Exact field-label wrapper matching for older/weak DOM builds.
+      3. Very narrow attribute fallback.
+
+    We deliberately do NOT use broad ancestor text matching for pilgrim
+    fields. That was the source of the old-form bug where Photo ID Number
+    (e.g. 441...) could be selected as Age.
+    """
+    name_aliases = {
+        "name": ["fname", "name"],
+        "age": ["age"],
+        "gender": ["gender", "sex"],
+        "id_type": ["photoIdType", "idType", "photoIDType", "photo_id_type"],
+        "id_number": ["idProofNumber", "idNumber", "photoIdNumber", "photoIDNumber", "photo_id_number"],
+        "email": ["pilgrimEmail", "email"],
+        "city": ["pilgrimCity", "city"],
+        "state": ["pilgrimState", "state"],
+        "country": ["pilgrimCountry", "country"],
+        "pincode": ["pilgrimPincode", "pincode", "pinCode", "postalCode"],
     }
 
-    result = []
-    exact = exact_names.get(key)
+    aliases = name_aliases.get(key, [])
 
-    if exact:
+    # Exact semantic names first.
+    for exact in aliases:
         selectors = [
             f'[name="{exact}"]:visible',
-            f'[id="{exact}"]:visible',
             f'[data-name="{exact}"]:visible',
             f'[data-field="{exact}"]:visible',
-            f'input[placeholder*="{exact}" i]:visible',
-            f'input[aria-label*="{exact}" i]:visible',
         ]
-        # IMPORTANT: do not deduplicate repeated pilgrim controls by outerHTML.
-        # TTD renders rows with identical markup, so Pilgrim 1 and Pilgrim 2 can
-        # have exactly the same outerHTML. Deduplicating by markup incorrectly
-        # collapses all repeated rows into the first row.
-        #
-        # Prefer the first selector that actually finds controls. This preserves
-        # every DOM occurrence in document order: nth(0) = pilgrim 1, nth(1) =
-        # pilgrim 2, etc.
+        if key in {"email", "city", "state", "country", "pincode"}:
+            selectors.append(f'[id="{exact}"]:visible')
+
         for selector in selectors:
             try:
                 loc = page.locator(selector)
@@ -1068,10 +1319,41 @@ def find_fields(page, key):
             except Exception:
                 pass
 
+    # Critical compatibility layer for the older TTD form.
+    if key in {"name", "age", "gender", "id_type", "id_number"}:
+        labeled = _find_pilgrim_fields_by_label(page, key)
+        if labeled:
+            return labeled
+
+    # Narrow attribute fallback only; never inspect broad parent text for age or
+    # ID fields.
+    result = []
     controls = page.locator(
         "input:visible, textarea:visible, select:visible, "
-        "[contenteditable='true']:visible"
+        "[role='combobox']:visible, [contenteditable='true']:visible"
     )
+    field_attr_patterns = {
+        "name": re.compile(r"^(fname|name)$", re.I),
+        "age": re.compile(r"^age$", re.I),
+        "gender": re.compile(r"^(gender|sex)$", re.I),
+        "id_type": re.compile(r"^(photoidtype|idtype|photo[_-]?id[_-]?type)$", re.I),
+        "id_number": re.compile(r"^(idproofnumber|idnumber|photoidnumber|photo[_-]?id[_-]?number)$", re.I),
+    }
+
+    pattern = field_attr_patterns.get(key)
+    if pattern:
+        for i in range(controls.count()):
+            c = controls.nth(i)
+            try:
+                attrs = " ".join(
+                    (c.get_attribute(a) or "")
+                    for a in ("name", "placeholder", "aria-label", "title", "label")
+                )
+                if pattern.search(norm(attrs)):
+                    result.append(c)
+            except Exception:
+                pass
+        return result
 
     for i in range(controls.count()):
         c = controls.nth(i)
@@ -1080,32 +1362,67 @@ def find_fields(page, key):
                 result.append(c)
         except Exception:
             pass
-
     return result
 
-TTD_DROPDOWN_ITEM_SELECTOR = "li.floatingDropdown_listItem__tU_5x:visible"
+def _visible_dropdown_options(page, control=None):
+    """Find dropdown options across old and new TTD dropdown implementations."""
+    selectors = [
+        "li.floatingDropdown_listItem__tU_5x:visible",  # newer observed
+        "li[class*='floatingDropdown_listItem']:visible",
+        "[role='option']:visible",
+        "li:visible",
+    ]
 
-
-def dropdown_options(page, control=None):
-    """Return only the live TTD custom-dropdown items.
-
-    The supplied live DOM uses:
-        li.floatingDropdown_listItem__tU_5x
-
-    When a control is supplied, scope the search to that control's wrapper so
-    an old/stale dropdown from another pilgrim cannot be selected accidentally.
-    """
-    if control is not None:
+    # Prefer options attached to the control's immediate wrapper. If that
+    # wrapper has no options, TTD may render the menu in a portal; then search
+    # the page for visible option-like elements.
+    for selector in selectors:
         try:
-            scoped = control.locator("xpath=..").locator(TTD_DROPDOWN_ITEM_SELECTOR)
-            if scoped.count():
-                return scoped
+            if control is not None:
+                scoped = control.locator("xpath=..").locator(selector)
+                if scoped.count():
+                    return scoped
         except Exception:
             pass
-    return page.locator(TTD_DROPDOWN_ITEM_SELECTOR)
+
+    for selector in selectors:
+        try:
+            loc = page.locator(selector)
+            if loc.count():
+                return loc
+        except Exception:
+            pass
+
+    return page.locator("li:visible")
+
+
+def _dropdown_value_matches(control, expected):
+    """Check a custom dropdown using value, text, aria/value attributes."""
+    wanted = norm(str(expected))
+    for attr in ("value", "aria-label", "data-value", "title"):
+        try:
+            actual = norm(control.get_attribute(attr) or "")
+            if actual == wanted or wanted in actual:
+                return True
+        except Exception:
+            pass
+    try:
+        actual = norm(control.input_value())
+        if actual == wanted or wanted in actual:
+            return True
+    except Exception:
+        pass
+    try:
+        actual = norm(control.inner_text())
+        if actual == wanted or wanted in actual:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def select_custom_dropdown(page, c, value):
+    """Select Gender/Photo ID for both old and new TTD dropdowns."""
     target = norm(str(value))
     aliases = {target}
 
@@ -1123,49 +1440,100 @@ def select_custom_dropdown(page, c, value):
     except Exception:
         pass
 
+    # Re-check the exact control immediately before clicking. React may have
+    # replaced the input after the previous field was populated.
     try:
-        c.click(force=True)
+        c.click(force=True, timeout=1500)
     except Exception:
         try:
-            c.locator("xpath=..").click(force=True)
+            c.locator("xpath=..").click(force=True, timeout=1500)
         except Exception:
             return False
 
-    # TTD renders the list immediately after opening. Keep this short so the
-    # automation does not feel slow, while allowing React to paint the list.
-    options = dropdown_options(page, c)
+    page.wait_for_timeout(100)
+
+    options = _visible_dropdown_options(page, c)
     count = options.count()
     print(f"[DEBUG] TTD dropdown option count: {count}")
 
-    # Exact live TTD items only. This avoids accidentally seeing an option
-    # belonging to another dropdown that remains visible in the DOM.
+    # Search exact visible text first. This avoids selecting an unrelated
+    # option such as a hidden/stale dropdown belonging to another row.
+    exact_matches = []
+    seen_option_keys = set()
     for i in range(count):
         opt = options.nth(i)
         try:
+            if not opt.is_visible():
+                continue
             txt = norm(opt.inner_text())
         except Exception:
             continue
+        if txt in aliases:
+            try:
+                key = opt.evaluate("e => e.outerHTML.slice(0,1200)")
+            except Exception:
+                key = f"option:{i}:{txt}"
+            if key not in seen_option_keys:
+                seen_option_keys.add(key)
+                exact_matches.append(opt)
 
-        print(f"[DEBUG] TTD option {i}: '{txt}'")
-        if txt not in aliases:
-            continue
+    # Older TTD builds can render dropdown choices in a portal using div/span
+    # rather than li or role=option. Use Playwright's text engine as a final
+    # option-discovery fallback.
+    if not exact_matches:
+        for alias in aliases:
+            try:
+                text_matches = page.get_by_text(alias, exact=True)
+                for i in range(text_matches.count()):
+                    opt = text_matches.nth(i)
+                    if opt.is_visible():
+                        exact_matches.append(opt)
+            except Exception:
+                pass
 
+    print(f"[DEBUG] Exact dropdown options matching requested value: {len(exact_matches)}")
+
+    for opt in exact_matches:
         try:
+            print(f"[DEBUG] Selecting TTD dropdown option: '{norm(opt.inner_text())}'")
             opt.scroll_into_view_if_needed()
-            opt.click(force=True)
+            opt.click(force=True, timeout=1500)
+            page.wait_for_timeout(100)
         except Exception:
             continue
 
-        # React state/value update is normally immediate. One short check is
-        # enough; avoid the previous 250ms + 300ms retry chain.
-        if verify(c, value):
-            print(f"[OK] Exact TTD dropdown selection: {txt}")
+        if _dropdown_value_matches(c, value):
+            print(f"[OK] TTD dropdown selection verified: {value}")
             return True
 
-        # One additional short check for asynchronous React state updates.
-        if verify(c, value):
-            print(f"[OK] Exact TTD dropdown selection: {txt}")
-            return True
+        # React can replace the control after selection. Re-find the same
+        # semantic field and check whether the selected row now contains value.
+        try:
+            key = None
+            nm = norm(c.get_attribute("name") or "")
+            if nm in {"gender", "sex"}:
+                key = "gender"
+            elif nm in {"photoidtype", "idtype", "photo_id_type", "photoidtype"}:
+                key = "id_type"
+            else:
+                # Old TTD controls may have no useful name at all. Infer the
+                # semantic field from its visible label/wrapper.
+                for candidate_key, candidate_label in (("gender", "gender"), ("id_type", "photo id proof")):
+                    try:
+                        wrapper_text = norm(c.locator("xpath=..").inner_text())
+                        if candidate_label in wrapper_text:
+                            key = candidate_key
+                            break
+                    except Exception:
+                        pass
+            if key:
+                fresh = find_fields(page, key)
+                for fresh_control in fresh:
+                    if _dropdown_value_matches(fresh_control, value):
+                        print(f"[OK] TTD dropdown selection verified after React refresh: {value}")
+                        return True
+        except Exception:
+            pass
 
     snapshot(page, f"{target.replace(' ', '_')}_dropdown_options_not_found")
     return False
@@ -1190,15 +1558,12 @@ def set_control(page, c, value, custom=False):
         except Exception:
             return False
 
-    # Do not press Tab here. TTD's SPA can react to focus/keyboard events
-    # and navigate away from the booking page. Playwright fill() already
-    # triggers the input events required by the form.
     return verify(c, value)
+
 
 def verify(c, expected):
     wanted = norm(str(expected))
 
-    # Standard input/select value.
     try:
         actual = norm(c.input_value())
         if actual == wanted or wanted in actual:
@@ -1206,7 +1571,6 @@ def verify(c, expected):
     except Exception:
         pass
 
-    # Custom/readonly input exposing a value attribute.
     try:
         actual = norm(c.get_attribute("value") or "")
         if actual == wanted or wanted in actual:
@@ -1214,7 +1578,6 @@ def verify(c, expected):
     except Exception:
         pass
 
-    # Custom dropdown/control where selected value is represented as text.
     try:
         actual = norm(c.inner_text())
         if actual == wanted or wanted in actual:
@@ -1223,6 +1586,7 @@ def verify(c, expected):
         pass
 
     return False
+
 
 def fill_one(page, c, value, label="", custom=False):
     ok = set_control(page, c, value, custom=custom)
@@ -1234,29 +1598,29 @@ def fill_one(page, c, value, label="", custom=False):
 
     return ok
 
+
 def fill_pilgrims(page, pilgrims, unresolved):
-    """Populate every configured pilgrim row in the TTD form.
-
-    The screenshot shows the same five fields repeated horizontally for each
-    pilgrim. TTD renders those controls as repeated DOM elements, so the nth
-    matching field belongs to pilgrim n. We discover all visible fields for each
-    column once, then populate row-by-row using the same index across Name, Age,
-    Gender, Photo ID Proof and Photo ID Number.
-
-    This intentionally does not wait for additional rows to appear. If the
-    currently rendered form does not contain enough rows, it fails fast and
-    reports exactly which pilgrim/field is missing.
-    """
+    """Populate pilgrims safely on both old and new TTD Screen-2 forms."""
     if not isinstance(pilgrims, list):
         return
 
-    field_cache = {}
-    for key in ("name", "age", "gender", "id_type", "id_number"):
-        field_cache[key] = find_fields(page, key)
-        print(f"[PILGRIMS] {key}: found {len(field_cache[key])} visible field(s) for {len(pilgrims)} configured pilgrim(s).")
+    total = len(pilgrims)
+    print(f"[PILGRIMS] Configured pilgrim count: {total}")
+
+    # Detect the schema once from the currently visible DOM. This prevents a
+    # React re-render from making one field use the new names and another field
+    # use the old fallback mapping during the same row.
+    schema = {
+        "name": "fname" if page.locator('[name="fname"]:visible').count() else "name",
+        "age": "age",
+        "gender": "gender" if page.locator('[name="gender"]:visible').count() else "sex",
+        "id_type": "photoIdType" if page.locator('[name="photoIdType"]:visible').count() else "idType",
+        "id_number": "idProofNumber" if page.locator('[name="idProofNumber"]:visible').count() else "idNumber",
+    }
+    print(f"[PILGRIMS] Detected TTD field schema: {schema}")
 
     for idx, p in enumerate(pilgrims, 1):
-        print(f"[INFO] Pilgrim {idx}/{len(pilgrims)}: {p.get('name', '')}")
+        print(f"[INFO] Pilgrim {idx}/{total}: {p.get('name', '')}")
 
         ordered = [
             ("name", "Name", p.get("name")),
@@ -1267,45 +1631,49 @@ def fill_pilgrims(page, pilgrims, unresolved):
         ]
 
         for key, label, value in ordered:
-            fields = field_cache[key]
+            # Use the schema-specific selector first, then the alias-aware
+            # finder. Always take the nth occurrence for pilgrim idx.
+            fields = find_fields(page, key)
+            print(
+                f"[PILGRIMS] Pilgrim {idx} {label}: "
+                f"found {len(fields)} matching visible field(s)"
+            )
 
             if len(fields) < idx:
-                unresolved.append(
-                    (f"Pilgrim {idx} - {label}",
-                     "REDACTED" if key == "id_number" else value,
-                     "not_found")
-                )
+                unresolved.append((
+                    f"Pilgrim {idx} - {label}",
+                    "REDACTED" if key == "id_number" else value,
+                    "not_found",
+                ))
                 print(
-                    f"[MANUAL] Pilgrim {idx} - {label}: row {idx} is not currently "
-                    f"rendered (found {len(fields)} row(s))."
+                    f"[MANUAL] Pilgrim {idx} - {label}: "
+                    f"not_found (found {len(fields)}, need row {idx})"
                 )
                 continue
 
             field = fields[idx - 1]
 
-            # Fail fast if the ID controls are disabled right now. Do not wait
-            # for a React re-render.
+            if value in (None, ""):
+                unresolved.append((
+                    f"Pilgrim {idx} - {label}",
+                    "REDACTED" if key == "id_number" else "",
+                    "not_configured",
+                ))
+                print(f"[MANUAL] Pilgrim {idx} - {label}: not configured")
+                continue
+
             if key in ("id_type", "id_number"):
                 try:
                     if field.is_disabled():
-                        unresolved.append(
-                            (f"Pilgrim {idx} - {label}",
-                             "REDACTED" if key == "id_number" else value,
-                             "disabled")
-                        )
-                        print(f"[MANUAL] Pilgrim {idx} - {label}: field is disabled now.")
+                        unresolved.append((
+                            f"Pilgrim {idx} - {label}",
+                            "REDACTED" if key == "id_number" else value,
+                            "disabled",
+                        ))
+                        print(f"[MANUAL] Pilgrim {idx} - {label}: field is disabled")
                         continue
                 except Exception:
                     pass
-
-            if value in (None, ""):
-                unresolved.append(
-                    (f"Pilgrim {idx} - {label}",
-                     "REDACTED" if key == "id_number" else "",
-                     "not_configured")
-                )
-                print(f"[MANUAL] Pilgrim {idx} - {label}: not configured")
-                continue
 
             ok = fill_one(
                 page,
@@ -1316,11 +1684,11 @@ def fill_pilgrims(page, pilgrims, unresolved):
             )
 
             if not ok:
-                unresolved.append(
-                    (f"Pilgrim {idx} - {label}",
-                     "REDACTED" if key == "id_number" else value,
-                     "verification_failed")
-                )
+                unresolved.append((
+                    f"Pilgrim {idx} - {label}",
+                    "REDACTED" if key == "id_number" else value,
+                    "verification_failed",
+                ))
                 continue
 
             try:
@@ -1330,26 +1698,57 @@ def fill_pilgrims(page, pilgrims, unresolved):
             except Exception:
                 pass
 
-    print(f"[OK] Processed all {len(pilgrims)} configured pilgrim row(s).")
+    print(f"[OK] Processed all {total} configured pilgrim row(s).")
 
 def fill_general(page, contact, unresolved):
-    # Exact TTD DOM names from supplied HTML:
-    # pilgrimEmail, pilgrimCity, pilgrimState, pilgrimCountry, pilgrimPincode.
+    """Populate the optional Generic/General Details section.
+
+    TTD Screen 2 can appear in two forms:
+      1. Pilgrim Details only.
+      2. Pilgrim Details + Generic/General Details.
+
+    Generic details are OPTIONAL from the automation-flow perspective:
+    if none of the generic fields are present on the current Screen 2,
+    skip the section and continue with the pilgrim fields.
+
+    If the generic section is present, populate the fields that are both
+    present and configured. Missing configured generic fields are reported
+    for manual attention, but the entire section is not treated as mandatory
+    when TTD does not render it.
+    """
+    generic_fields = {
+        key: find_fields(page, key)
+        for key in ("email", "city", "state", "country", "pincode")
+    }
+
+    present_keys = [key for key, fields in generic_fields.items() if fields]
+
+    if not present_keys:
+        print("[GENERAL] Generic/General Details form not present; skipping it.")
+        return
+
+    print(
+        "[GENERAL] Generic/General Details form detected; "
+        f"available fields: {', '.join(present_keys)}"
+    )
+
     for key, label in [
         ("email", "Email"), ("city", "City"), ("state", "State"),
         ("country", "Country"), ("pincode", "Pincode")
     ]:
+        fields = generic_fields[key]
+
+        # Field is not rendered on this version of Screen 2.
+        # Do not fail the whole flow because the section may be partial.
+        if not fields:
+            print(f"[GENERAL] {label}: field not present; skipping.")
+            continue
+
         value = contact.get(key)
 
         if not value or str(value).startswith("YOUR_"):
             unresolved.append((label, "", "not_configured"))
             print(f"[MANUAL] {label}: not configured")
-            continue
-
-        fields = find_fields(page, key)
-        if not fields:
-            unresolved.append((label, "", "not_found"))
-            print(f"[MANUAL] {label}: not found")
             continue
 
         if fill_one(page, fields[0], value):
@@ -1360,31 +1759,30 @@ def fill_general(page, contact, unresolved):
 
 
 def save_auth_state(context):
-    """Backup current cookies/localStorage without closing the browser."""
+    """Save a diagnostic/auth backup without using it to overwrite the live profile.
+
+    The primary session store is the persistent Chromium profile itself.
+    TTD may keep authentication in cookies/localStorage and can also use
+    browser/session state that should not be reconstructed by manually adding
+    cookies from an older snapshot.
+    """
     try:
         BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         context.storage_state(path=str(TTD_AUTH_STATE_FILE))
-        print(f"[AUTH] Saved auth state: {TTD_AUTH_STATE_FILE}")
+        print(f"[AUTH] Saved auth backup: {TTD_AUTH_STATE_FILE}")
     except Exception as exc:
         print(f"[WARN] Auth-state backup failed: {exc}")
 
 
 def restore_auth_cookies(context):
-    """Restore cookies from the optional auth-state backup."""
-    if not TTD_AUTH_STATE_FILE.exists():
-        print("[AUTH] No previous auth-state backup found.")
-        return
+    """Deprecated: do not inject stale cookies into a persistent TTD profile.
 
-    try:
-        state = json.loads(TTD_AUTH_STATE_FILE.read_text(encoding="utf-8"))
-        cookies = state.get("cookies", [])
-        if cookies:
-            context.add_cookies(cookies)
-            print(f"[AUTH] Restored {len(cookies)} saved cookies.")
-        else:
-            print("[AUTH] Saved auth state contains no cookies.")
-    except Exception as exc:
-        print(f"[WARN] Could not restore saved auth cookies: {exc}")
+    launch_persistent_context() already reuses the profile directory, including
+    the site's normal browser storage. Injecting cookies from a previous
+    snapshot can create a mixed/stale authentication state and trigger another
+    OTP. This function is retained only for compatibility with older code.
+    """
+    print("[AUTH] Persistent profile is authoritative; skipping stale cookie restore.")
 
 
 def ttd_login_screen(page):
@@ -1406,13 +1804,40 @@ def ttd_login_screen(page):
 
 
 def save_auth_if_authenticated(context, page):
-    """Save state only when the page does not look like an OTP/login screen."""
+    """Persist the current browser profile/backup only when not on OTP/login."""
     try:
         if not ttd_login_screen(page):
             save_auth_state(context)
     except Exception:
         pass
 
+
+def wait_for_auth_completion(page, context):
+    """Wait for the user to complete OTP/CAPTCHA once, then persist the session.
+
+    This does not attempt to solve or bypass OTP/CAPTCHA. It simply keeps the
+    same persistent browser profile alive and saves the authenticated state
+    after the user completes the normal TTD login flow.
+    """
+    if not ttd_login_screen(page):
+        return True
+
+    print("[AUTH] TTD login/OTP is currently required.")
+    print("[AUTH] Complete OTP/CAPTCHA manually in the SAME browser window.")
+    print("[AUTH] After the TTD dashboard/booking page appears, press ENTER here.")
+    input("[AUTH] Press ENTER after authentication is complete: ")
+
+    try:
+        if ttd_login_screen(page):
+            print("[AUTH] Login/OTP screen is still visible.")
+            print("[AUTH] Session was not marked authenticated; leaving browser open.")
+            return False
+    except Exception:
+        return False
+
+    save_auth_state(context)
+    print("[AUTH] Authenticated persistent profile saved. Future runs will reuse it.")
+    return True
 
 def hold_browser(page, reason, allow_resume=False):
     """Keep the browser open and let the user choose ready or CLOSE.
@@ -1534,7 +1959,7 @@ def run_execution_1(page, booking, ticket_count):
 
 
 def run_execution_2(page, data):
-    """Screen 2 only: populate all configured pilgrim rows + contact details."""
+    """Screen 2: populate pilgrim rows, optionally populate Generic Details, then Continue."""
     print("\n[EXECUTION 2] Screen 2: Pilgrim Details")
 
     pilgrims = data.get("pilgrims", [])
@@ -1567,23 +1992,24 @@ def run_execution_2(page, data):
 
             print("[EXECUTION 2] Pilgrim/contact details populated successfully.")
 
-            # User requested two Continue clicks from Screen 2.
-            if not click_ttd_continue(page, 2, "Screen 2"):
-                print("[CONTINUE] Screen 2 Continue sequence failed.")
+            # Screen 2 is complete after Pilgrim Details are populated.
+            # Generic/General Details are filled only when that form is present.
+            # Then click Continue once.
+            if not click_ttd_continue(page, 1, "Screen 2"):
+                print("[CONTINUE] Screen 2 Continue failed.")
                 snapshot(page, "screen2_continue_failed")
                 hold_result = hold_for_manual_takeover(
                     page,
-                    "Screen 2 fields are populated, but one or both Continue clicks "
-                    "could not be verified."
+                    "Screen 2 fields are populated, but Continue could not be clicked."
                 )
                 if hold_result in ("1", "2", "CLOSE"):
                     return hold_result
                 continue
 
             save_auth_if_authenticated(page.context, page)
-            print("[OK] Screen 2 Continue clicked twice.")
+            print("[OK] Screen 2 Continue clicked.")
             print("[EXECUTION 2] Browser remains open for final manual review.")
-            snapshot(page, "screen2_continue_twice_complete")
+            snapshot(page, "screen2_continue_complete")
             return True
 
         except Exception as exc:
@@ -1618,8 +2044,6 @@ def main():
                 timezone_id=booking.get("timezone", "Asia/Kolkata")
             )
 
-            restore_auth_cookies(context)
-
             print(f"[DEBUG] Pages opened: {len(context.pages)}")
             page = context.pages[0] if context.pages else context.new_page()
 
@@ -1636,11 +2060,12 @@ def main():
             print("[INFO] The same Chromium profile is reused on every run.")
 
             if ttd_login_screen(page):
-                print("[AUTH] TTD is asking for login/OTP.")
-                print("[AUTH] Complete OTP/CAPTCHA manually.")
+                if not wait_for_auth_completion(page, context):
+                    print("[AUTH] Authentication is incomplete; browser will remain open.")
+                    return
             else:
-                print("[AUTH] Existing TTD session appears available.")
-                print("[AUTH] No OTP should be needed unless TTD invalidates the server session.")
+                print("[AUTH] Existing TTD session appears available from the persistent profile.")
+                print("[AUTH] No cookie injection or session reconstruction will be performed.")
 
             print("\nBOOKING PREPARATION:")
             print("1. If TTD asks for OTP/CAPTCHA, complete it manually.")
