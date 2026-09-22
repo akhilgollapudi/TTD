@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-TTD Special Entry Darshan Booking Assistant v13 - HTML DOM mapped
+TTD Special Entry Darshan Booking Assistant v14 - HTML DOM mapped
 
-Targets the form structure shown in the supplied TTD screenshot.
+Targets multiple supplied TTD Screen-1/Screen-2 DOM variants, including radio-card slots.
 
 Darshan Details:
   Darshan Date | Darshan Slot | No. of Tickets | Ticket Amount
@@ -18,7 +18,7 @@ Date/slot behavior:
   - Try the requested target_date.
   - If unavailable and date_fallback == NEXT_AVAILABLE, select the earliest
     enabled date after the requested date that is exposed by the live UI.
-  - On the selected date, inspect all live slots immediately.
+  - On the selected date, inspect all live slots immediately, including radio-card layouts.
   - Slot selection prioritizes the slot with the HIGHEST reported availability;
     preferred_slot is only a tie-breaker, then earliest slot time.
   - No artificial waiting is performed for Screen 1, Screen 2, slots, or Continue.
@@ -795,6 +795,149 @@ def slot_card_candidates(page):
                     ):
                         candidates[pos] = item
                     break
+
+
+    # ------------------------------------------------------------------
+    # RADIO-CARD FALLBACK
+    # ------------------------------------------------------------------
+    # Some TTD Screen-1 variants use a radio input inside each slot card,
+    # e.g.:
+    #
+    #   [radio] 3079 Available   12:00 PM
+    #   [radio] 2390 Available    1:00 PM
+    #
+    # These cards do not always expose the newer SlotBooking_* classes.
+    # Discover them directly from the radio control and walk upward to the
+    # smallest ancestor containing exactly one time + availability count.
+    # This is a fallback/merge path, so the existing button/card layouts
+    # continue to work unchanged.
+    try:
+        radio_inputs = page.locator(
+            "input[type='radio']:visible, [role='radio']:visible"
+        )
+
+        for ri in range(radio_inputs.count()):
+            radio = radio_inputs.nth(ri)
+
+            try:
+                checked = bool(radio.is_checked()) if radio.get_attribute("type") == "radio" else False
+            except Exception:
+                checked = False
+
+            radio_card = None
+            radio_text = ""
+
+            for level in range(1, 9):
+                try:
+                    ancestor = radio.locator("xpath=" + "/.." * level)
+                    if not ancestor.count():
+                        continue
+
+                    txt = norm(ancestor.inner_text())
+                    times = list(time_pattern.finditer(txt))
+                    if len(times) != 1:
+                        continue
+
+                    if not re.search(
+                        r"\bavailable\b|\bremaining\b|\bquota\b",
+                        txt,
+                        re.I,
+                    ):
+                        continue
+
+                    # Keep searching for a smaller valid card. The first
+                    # matching ancestor is normally the actual radio card.
+                    radio_card = ancestor
+                    radio_text = txt
+                    break
+                except Exception:
+                    continue
+
+            if radio_card is None:
+                continue
+
+            tm = time_pattern.search(radio_text)
+            if not tm:
+                continue
+
+            slot_time = normalize_time_text(tm.group(1))
+            count = availability_count(radio_text)
+
+            if count is None:
+                # A radio card without a numeric availability cannot be
+                # ranked safely under the requested highest-availability rule.
+                continue
+
+            lower = radio_text.lower()
+            blocked = (
+                count <= 0
+                or "quota is full" in lower
+                or "quota not released" in lower
+                or "slot not available" in lower
+            )
+
+            try:
+                cursor = norm(
+                    radio_card.evaluate("e => getComputedStyle(e).cursor")
+                )
+                if cursor == "not-allowed":
+                    blocked = True
+            except Exception:
+                pass
+
+            # Determine whether the card explicitly states a person
+            # capacity (used by Seva-style variants).
+            capacity = None
+            cap_match = re.search(r"\b(\d+)\s*persons?\b", radio_text, re.I)
+            if cap_match:
+                try:
+                    capacity = int(cap_match.group(1))
+                except ValueError:
+                    capacity = None
+
+            # Radio layouts are standard slots unless they contain an
+            # explicit named-Seva marker and capacity.
+            named_seva = not bool(
+                re.search(r"\bslot\s*time\b", radio_text, re.I)
+            )
+
+            item = {
+                "locator": radio_card,
+                "button": radio,
+                "text": radio_text,
+                "time": slot_time,
+                "minutes": parse_slot_time(slot_time),
+                "availability_text": radio_text,
+                "availability_color": "",
+                "availability_count": count,
+                "capacity": capacity,
+                "named_seva": named_seva,
+                "available": bool(count > 0 and not blocked),
+                "blocked": blocked,
+            }
+
+            # Merge by time. Prefer the radio-discovered item when the
+            # existing discovery has no numeric availability.
+            replaced = False
+            for pos, existing in enumerate(candidates):
+                if existing.get("time") == slot_time:
+                    replaced = True
+                    if (
+                        existing.get("availability_count") is None
+                        and count is not None
+                    ):
+                        candidates[pos] = item
+                    break
+
+            if not replaced:
+                candidates.append(item)
+                seen.add(slot_time)
+
+    except Exception as exc:
+        print(
+            f"[DEBUG] Radio-slot fallback inspection failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
     return candidates
 
