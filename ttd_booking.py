@@ -550,7 +550,7 @@ def choose_booking_date(page, booking):
     return False, None
 
 
-def slot_card_candidates(page):
+def slot_card_candidates_fallback(page):
     """Discover slot cards across TTD Screen-1 variants.
 
     Supported variants include:
@@ -940,6 +940,152 @@ def slot_card_candidates(page):
         )
 
     return candidates
+
+
+
+def slot_card_candidates(page):
+    """Fast Screen-1 slot scan using one browser-side DOM evaluation.
+
+    The previous implementation walked many visible DOM nodes through
+    Playwright and then walked ancestors for each node. That is robust but can
+    be expensive on a large React page. This fast path instead:
+      1. Finds likely slot controls directly (radio/role=radio/4-digit buttons).
+      2. Walks only a few DOM ancestors inside the browser process.
+      3. Extracts time, availability and person capacity in one evaluate().
+      4. Adds a temporary stable attribute to each discovered control so Python
+         only has to locate/click the winning control.
+
+    If the fast DOM scan finds nothing, the original compatibility scanner is
+    used automatically.
+    """
+    marker = "data-ttd-fast-slot-id"
+    try:
+        raw_items = page.evaluate("""(marker) => {
+            const timeRe = /(?:slot\\s*time\\s+)?(\\d{1,2}:\\d{2}\\s*[ap]m)\\b/i;
+            const availRe = /\\b(\\d[\\d,]*)\\s*(?:available|remaining)\\b/i;
+            const availRe2 = /(?:available|availability|quota)\\s*[:\\-]?\\s*(\\d[\\d,]*)/i;
+            const capRe = /\\b(\\d+)\\s*persons?\\b/i;
+            const blockedRe = /quota\\s+is\\s+full|quota\\s+not\\s+released|slot\\s+not\\s+available/i;
+            const blockedColors = new Set([
+                'rgb(232, 72, 60)', 'rgb(255, 30, 34)', 'rgb(255, 31, 38)',
+                'rgb(121, 192, 235)', 'rgb(5, 175, 232)', 'rgb(204, 204, 204)'
+            ]);
+
+            const visible = (el) => {
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const st = getComputedStyle(el);
+                return r.width > 0 && r.height > 0 &&
+                       st.display !== 'none' && st.visibility !== 'hidden';
+            };
+
+            const norm = (v) => String(v || '').replace(/\\s+/g, ' ').trim();
+            const timeToMinutes = (t) => {
+                const m = String(t || '').match(/(\\d{1,2}):(\\d{2})\\s*([ap]m)/i);
+                if (!m) return null;
+                let h = Number(m[1]);
+                const min = Number(m[2]);
+                const ap = m[3].toLowerCase();
+                if (ap === 'pm' && h !== 12) h += 12;
+                if (ap === 'am' && h === 12) h = 0;
+                return h * 60 + min;
+            };
+
+            const controls = Array.from(document.querySelectorAll(
+                'input[type="radio"], [role="radio"], button, input[type="button"], input[type="submit"]'
+            )).filter(visible);
+
+            const out = [];
+            let seq = 0;
+
+            for (const control of controls) {
+                const value = norm(control.getAttribute('value'));
+                const aria = norm(control.getAttribute('aria-label'));
+                const ownText = norm(control.innerText || control.textContent || '');
+                const likelyButton = /^\\d{4}$/.test(value);
+                const likelyRadio = control.matches('input[type="radio"], [role="radio"]');
+                if (!likelyRadio && !likelyButton && !timeRe.test(ownText + ' ' + aria)) continue;
+
+                let card = null;
+                let el = control;
+                for (let level = 0; level < 7 && el; level++, el = el.parentElement) {
+                    const txt = norm(el.innerText || el.textContent || '');
+                    const tm = txt.match(timeRe);
+                    if (!tm) continue;
+                    if (!/\\bavailable\\b|quota\\s+is\\s+full|quota\\s+not\\s+released|slot\\s+not\\s+available/i.test(txt)) continue;
+                    const allTimes = [...txt.matchAll(/(?:slot\\s*time\\s+)?(\\d{1,2}:\\d{2}\\s*[ap]m)\\b/ig)]
+                        .map(x => x[1].replace(/\\s+/g, ' ').trim().toLowerCase());
+                    const distinct = [...new Set(allTimes)];
+                    if (distinct.length === 1) { card = el; break; }
+                }
+                if (!card) continue;
+
+                const text = norm(card.innerText || card.textContent || '');
+                const tm = text.match(timeRe);
+                if (!tm) continue;
+                const slotTime = tm[1].replace(/\\s+/g, ' ').trim().toLowerCase();
+                let m = text.match(availRe);
+                if (!m) m = text.match(availRe2);
+                const count = m ? Number(m[1].replace(/,/g, '')) : null;
+                const cap = text.match(capRe);
+                const capacity = cap ? Number(cap[1]) : null;
+
+                const disabled = !!control.disabled ||
+                    control.getAttribute('aria-disabled') === 'true' ||
+                    card.getAttribute('aria-disabled') === 'true';
+                const state = text.toLowerCase();
+                let color = '';
+                try { color = getComputedStyle(card).backgroundColor || ''; } catch (_) {}
+                const blocked = disabled || blockedRe.test(state) || blockedColors.has(color) || count === 0;
+                const available = count !== null && count > 0 && !blocked;
+                if (!available && count === null && !/\\bavailable\\b/i.test(state)) continue;
+
+                const id = `ttd-fast-${Date.now()}-${seq++}`;
+                control.setAttribute(marker, id);
+                out.push({
+                    id,
+                    time: slotTime,
+                    minutes: timeToMinutes(slotTime),
+                    availability_count: Number.isFinite(count) ? count : null,
+                    capacity: Number.isFinite(capacity) ? capacity : null,
+                    named_seva: !/\\bslot\\s*time\\b/i.test(text),
+                    available,
+                    blocked,
+                    availability_text: text,
+                    text
+                });
+            }
+
+            // Deduplicate by time, preferring the record with numeric
+            // availability. This handles nested radio/button controls.
+            const byTime = new Map();
+            for (const item of out) {
+                const prev = byTime.get(item.time);
+                if (!prev || (prev.availability_count == null && item.availability_count != null)) {
+                    byTime.set(item.time, item);
+                }
+            }
+            return [...byTime.values()];
+        }""", marker)
+        if not raw_items:
+            return slot_card_candidates_fallback(page)
+
+        candidates=[]
+        for item in raw_items:
+            control=page.locator(f'[{marker}="{item["id"]}"]:visible').first
+            if not control.count():
+                continue
+            item["button"] = control
+            item["locator"] = control
+            candidates.append(item)
+
+        if candidates:
+            return candidates
+    except Exception as exc:
+        print(f"[DEBUG] Fast slot scan failed: {type(exc).__name__}: {exc}")
+
+    return slot_card_candidates_fallback(page)
+
 
 
 def click_slot(page, slot):
