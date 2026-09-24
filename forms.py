@@ -2,10 +2,10 @@ import re
 
 if __package__:
     from .config import *
-    from .utils import norm, matches, snapshot
+    from .utils import norm, matches, snapshot, is_gothram_seva
 else:
     from config import *
-    from utils import norm, matches, snapshot
+    from utils import norm, matches, snapshot, is_gothram_seva
 
 """TTD Screen-2 pilgrim/contact form handling."""
 
@@ -522,7 +522,53 @@ def fill_pilgrims(page, pilgrims, unresolved):
 
     print(f"[OK] Processed all {total} configured pilgrim row(s).")
 
-def fill_general(page, contact, unresolved):
+def find_gothram_field(page):
+    """Find the Gothram input on the Homam Screen-2 variant."""
+    selectors = [
+        '[name="gothram"]:visible',
+        '[name="gotram"]:visible',
+        '[id="gothram"]:visible',
+        '[id="gotram"]:visible',
+        '[data-name="gothram"]:visible',
+        '[data-field="gothram"]:visible',
+    ]
+    for selector in selectors:
+        try:
+            loc = page.locator(selector)
+            if loc.count():
+                return loc.first
+        except Exception:
+            pass
+
+    # The observed TTD label is exactly "Gothram". Reuse the same narrow
+    # label-wrapper logic used for the other form fields rather than matching
+    # broad page text.
+    labeled = _find_labeled_control(page, "gothram")
+    return labeled[0] if labeled else None
+
+def fill_gothram(page, value, unresolved):
+    """Fill Gothram only when the selected seva is the configured Homam."""
+    if not is_gothram_seva(page):
+        return
+
+    if value in (None, ""):
+        unresolved.append(("Gothram", "", "not_configured"))
+        print("[MANUAL] Gothram: not configured")
+        return
+
+    field = find_gothram_field(page)
+    if field is None:
+        unresolved.append(("Gothram", value, "not_found"))
+        print("[MANUAL] Gothram: field not found on the selected Homam form")
+        return
+
+    if fill_one(page, field, value, "Gothram"):
+        print(f"[OK] Gothram: {value}")
+    else:
+        unresolved.append(("Gothram", value, "verification_failed"))
+        print("[MANUAL] Gothram: verification failed")
+
+def fill_general(page, contact, unresolved, booking=None):
     """Populate the optional Generic/General Details section.
 
     TTD Screen 2 can appear in two forms:
@@ -546,7 +592,9 @@ def fill_general(page, contact, unresolved):
     present_keys = [key for key, fields in generic_fields.items() if fields]
 
     if not present_keys:
-        print("[GENERAL] Generic/General Details form not present; skipping it.")
+        print("[GENERAL] Generic/General Details form not present; checking seva-specific fields only.")
+        gothram_value = booking.get("gothram") if isinstance(booking, dict) else None
+        fill_gothram(page, gothram_value, unresolved)
         return
 
     debug(
@@ -579,3 +627,7 @@ def fill_general(page, contact, unresolved):
             unresolved.append((label, value, "verification_failed"))
             print(f"[MANUAL] {label}: verification failed")
 
+    # The Homam Screen 2 adds Gothram. It is intentionally ignored for all
+    # other sevas.
+    gothram_value = booking.get("gothram") if isinstance(booking, dict) else None
+    fill_gothram(page, gothram_value, unresolved)

@@ -3,7 +3,35 @@ if __package__:
 else:
     from config import *
 
+from urllib.parse import parse_qs, unquote, urlparse
+
 """Fast shared DOM/state helpers."""
+
+def selected_seva_name(page):
+    """Return the currently selected TTD seva name without navigation."""
+    try:
+        query = parse_qs(urlparse(page.url).query)
+        values = query.get("sevaName") or query.get("seva_name")
+        if values and values[0].strip():
+            return unquote(values[0]).strip()
+    except Exception:
+        pass
+
+    # Some TTD screen variants keep the seva name only in visible page text.
+    try:
+        body = body_text(page)
+        target = norm(GOTHRAM_SEVA_NAME)
+        for line in body.splitlines():
+            if norm(line) == target:
+                return line.strip()
+    except Exception:
+        pass
+
+    return ""
+
+def is_gothram_seva(page):
+    """True only for the configured Srinivasa Divyaanugraha Homam seva."""
+    return norm(selected_seva_name(page)) == norm(GOTHRAM_SEVA_NAME)
 
 def norm(v):
     return re.sub(r"\s+", " ", (v or "").strip().lower())

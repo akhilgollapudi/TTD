@@ -6,14 +6,14 @@ if __package__:
     from .config import *
     from .utils import load_data, load_latest_data, data_file_signature, snapshot, booking_in_progress
     from .calendar_handler import choose_booking_date
-    from .tickets import total_pilgrim_count, select_date_and_slot, click_ttd_continue
+    from .tickets import total_pilgrim_count, screen1_ticket_count, select_date_and_slot, click_ttd_continue
     from .forms import fill_pilgrims, fill_general
     from .auth import save_auth_if_authenticated, wait_for_auth_completion, ttd_login_screen
 else:
     from config import *
     from utils import load_data, load_latest_data, data_file_signature, snapshot, booking_in_progress
     from calendar_handler import choose_booking_date
-    from tickets import total_pilgrim_count, select_date_and_slot, click_ttd_continue
+    from tickets import total_pilgrim_count, screen1_ticket_count, select_date_and_slot, click_ttd_continue
     from forms import fill_pilgrims, fill_general
     from auth import save_auth_if_authenticated, wait_for_auth_completion, ttd_login_screen
 
@@ -126,7 +126,7 @@ def run_execution_1(page, booking, ticket_count, data):
     data_signature = data_file_signature()
 
     print("\n[EXECUTION 1] Screen 1: Date + Tickets + Slot")
-    print(f"[EXECUTION 1] Total pilgrims/tickets: {ticket_count}")
+    print(f"[EXECUTION 1] Screen 1 ticket count: {ticket_count}")
 
     while True:
         try:
@@ -205,6 +205,7 @@ def run_execution_2(page, data):
 
             pilgrims = data.get("pilgrims", [])
             contact = data.get("contact", {})
+            booking = data.get("booking", {})
             if not isinstance(pilgrims, list) or not pilgrims:
                 return hold_for_manual_takeover(
                     page, "No pilgrim records were found in pilgrims.json."
@@ -213,7 +214,7 @@ def run_execution_2(page, data):
             unresolved = []
             print(f"[EXECUTION 2] Filling {len(pilgrims)} pilgrim(s).")
             fill_pilgrims(page, pilgrims, unresolved)
-            fill_general(page, contact, unresolved)
+            fill_general(page, contact, unresolved, booking=booking)
             snapshot(page, "execution2_pilgrim_details")
 
             if unresolved:
@@ -317,9 +318,8 @@ def main():
                 # selecting 1 or 2 now uses exactly those latest 2 records.
                 data, data_signature, changed = load_latest_data(data, data_signature)
                 booking = data.get("booking", {})
-                ticket_count = total_pilgrim_count(data)
                 if changed:
-                    print(f"[CONFIG] Using latest JSON for this execution: {ticket_count} pilgrim(s).")
+                    print(f"[CONFIG] Latest pilgrim count: {total_pilgrim_count(data)}")
 
                 mode = wait_for_execution_mode()
                 if mode == "CLOSE":
@@ -335,7 +335,7 @@ def main():
                 # is waiting for input.
                 data, data_signature, _ = load_latest_data(data, data_signature)
                 booking = data.get("booking", {})
-                ticket_count = total_pilgrim_count(data)
+                ticket_count = screen1_ticket_count(page, data)
 
                 if mode == "1":
                     result = run_execution_1(page, booking, ticket_count, data)
@@ -348,9 +348,9 @@ def main():
                     # edits pilgrims.json. Refresh again before re-entering.
                     data, data_signature, _ = load_latest_data(data, data_signature)
                     booking = data.get("booking", {})
-                    ticket_count = total_pilgrim_count(data)
                     if context.pages:
                         page = context.pages[-1]
+                    ticket_count = screen1_ticket_count(page, data)
                     if result == "1":
                         result = run_execution_1(page, booking, ticket_count, data)
                     else:
