@@ -23,3 +23,10 @@ Example:
 ```
 
 Use the existing `pilgrims.json` in your project; this package does not overwrite it.
+
+
+## Date and slot selection update
+
+- `date_fallback: NEXT_AVAILABLE` now means the earliest selectable date strictly after `target_date`; earlier dates are never selected.
+- A successful date click is not followed by another date click in the same execution.
+- Slot selection now prioritizes the highest numeric availability across all currently available slots. `preferred_slot` and `prefer_evening_slot` are tie-breakers only.
