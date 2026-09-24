@@ -422,9 +422,21 @@ def fill_one(page, c, value, label="", custom=False):
     return ok
 
 def fill_pilgrims(page, pilgrims, unresolved):
-    """Populate pilgrims safely on both old and new TTD Screen-2 forms."""
+    """Populate pilgrims safely on both old and new TTD Screen-2 forms.
+
+    Divyaanugraha is a fixed one-ticket/two-person form in the observed TTD
+    UI. A shared pilgrims.json can contain more people for another seva; do
+    not let those extra rows create a false Screen-2 failure here.
+    """
     if not isinstance(pilgrims, list):
         return
+
+    if is_gothram_seva(page) and len(pilgrims) > 2:
+        print(
+            f"[PILGRIMS] Divyaanugraha fixed ticket covers 2 persons; "
+            f"{len(pilgrims)} configured. Filling the first 2 rows only."
+        )
+        pilgrims = pilgrims[:2]
 
     total = len(pilgrims)
     print(f"[PILGRIMS] Filling {total} pilgrim(s).")

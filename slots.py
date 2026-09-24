@@ -240,22 +240,17 @@ def slot_card_candidates_fallback(page):
             "blocked": blocked,
         }
 
-        # If the same time is discovered multiple times, prefer the smallest
-        # card / the one with a numeric availability count.
-        key = slot_time
+        # If the same clock time is discovered multiple times, keep distinct
+        # named-seva cards. This is important when Divyaanugraha shares 09:00
+        # AM with another service.
+        named_key = (
+            "divya" if ("divyaanugraha homam" in txt or "divyanugraha homam" in txt)
+            else ("named" if is_named_seva else "standard")
+        )
+        key = (slot_time, named_key, norm(txt[:180]))
         if key not in seen:
             seen.add(key)
             candidates.append(item)
-        else:
-            for pos, existing in enumerate(candidates):
-                if existing["time"] == key:
-                    if (
-                        existing.get("availability_count") is None
-                        and count is not None
-                    ):
-                        candidates[pos] = item
-                    break
-
 
     # ------------------------------------------------------------------
     # RADIO-CARD FALLBACK

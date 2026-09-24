@@ -30,8 +30,29 @@ def selected_seva_name(page):
     return ""
 
 def is_gothram_seva(page):
-    """True only for the configured Srinivasa Divyaanugraha Homam seva."""
-    return norm(selected_seva_name(page)) == norm(GOTHRAM_SEVA_NAME)
+    """True when the current TTD page is the Divyaanugraha Homam form.
+
+    TTD has used slightly different spelling/casing in URL text and visible
+    cards (Divyaanugraha/Divyanugraha). Prefer the explicit seva name when
+    available, but also recognize the distinctive visible Homam label so a
+    spelling variation does not accidentally route the form through generic
+    Screen-1 rules.
+    """
+    selected = norm(selected_seva_name(page))
+    target = norm(GOTHRAM_SEVA_NAME)
+    if selected == target:
+        return True
+    if "divyaanugraha" in selected or "divyanugraha" in selected:
+        return "homam" in selected
+
+    try:
+        body = norm(body_text(page))
+        return (
+            ("sri srinivasa divyaanugraha homam" in body)
+            or ("sri srinivasa divyanugraha homam" in body)
+        )
+    except Exception:
+        return False
 
 def norm(v):
     return re.sub(r"\s+", " ", (v or "").strip().lower())

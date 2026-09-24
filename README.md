@@ -31,13 +31,14 @@ open until CLOSE is explicitly selected.
 - `preferred_slot` and `prefer_evening_slot` are tie-breakers only.
 - No extra date changes or repeated slot searches are performed after selection.
 
-## Gothram / Homam
-For **Sri Srinivasa Divyaanugraha Homam**:
-- Screen 1 ticket count comes from `booking.tickets` (normally 1).
-- Screen 2 may still contain multiple pilgrim entries.
-- `booking.gothram` is filled for this seva only.
-- Other sevas keep the existing behavior: Screen 1 ticket count is based on the
-  number of pilgrims and Gothram is ignored.
+## Gothram / Divyaanugraha Homam
+For **Sri Srinivasa Divyaanugraha Homam** (matching the supplied TTD screenshots):
+- Screen 1 `Number of Tickets` is fixed/disabled at `01`; automation never tries to change it.
+- Only the **09:00 AM** `Sri Srinivasa Divyaanugraha Homam` card is eligible. Other seva cards/times are ignored.
+- The card is expected to represent **2 persons / ₹1600**.
+- Screen 2 fills **2 pilgrims** for the fixed ticket. If the shared `pilgrims.json` has more rows for another form, the extra rows are ignored for this form rather than blocking automation.
+- General Details (Gothram/email/city/state/country/pincode) are filled when those fields are rendered and configured. Missing optional Gothram is not allowed to break the generic fields; required configured fields still report for manual attention.
+- Other sevas keep the existing behavior: Screen 1 ticket count is based on the number of pilgrims and generic slot ranking remains unchanged.
 
 ## JSON refresh
 `pilgrims.json` can be edited while the browser remains open. The latest valid

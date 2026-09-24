@@ -189,11 +189,12 @@ def run_execution_1(page, booking, ticket_count, data, selected_date=None):
         try:
             if booking_in_progress(page):
                 snapshot(page, "execution1_booking_in_progress")
-                hold_result = hold_for_manual_takeover(
-                    page, "TTD reports that a pilgrim booking is already in progress."
+                print(
+                    "[READY] TTD reports that a booking is already in progress. "
+                    "No browser/session close will be performed. Returning to the "
+                    "main trigger listener; you can click another date or choose 1/2."
                 )
-                if hold_result in ("1", "2", "CLOSE"):
-                    return hold_result
+                return "READY"
 
             ok = select_date_and_slot(page, booking, ticket_count, selected_date=selected_date)
             if ok:
@@ -207,14 +208,12 @@ def run_execution_1(page, booking, ticket_count, data, selected_date=None):
                 # Screen 2 execution at any time.
                 if not wait_for_screen2(page, timeout_seconds=15):
                     snapshot(page, "screen2_not_detected_after_screen1")
-                    hold_result = hold_for_manual_takeover(
-                        page,
-                        "Screen 1 Continue was clicked, but Screen 2 was not detected. "
-                        "Manually bring up Screen 2, then retry or choose 2."
+                    print(
+                        "[READY] Screen 2 was not detected after Screen 1. "
+                        "Browser/session remains OPEN. Returning to the main trigger "
+                        "listener so you can click a date or choose 1/2."
                     )
-                    if hold_result in ("1", "2", "CLOSE"):
-                        return hold_result
-                    continue
+                    return "READY"
 
                 print("[AUTO] Screen 1 successful. Checking pilgrims.json for latest details before Screen 2...")
                 data, data_signature, changed = load_latest_data(data, data_signature)
@@ -223,7 +222,7 @@ def run_execution_1(page, booking, ticket_count, data, selected_date=None):
                 # running, Screen 2 now receives exactly those latest 2 rows.
                 if changed:
                     print(f"[CONFIG] Screen 2 using latest JSON: {total_pilgrim_count(data)} pilgrim(s).")
-                result2 = run_execution_2(page, data)
+                result2 = run_execution_2(page, data, browser_triggered=(selected_date is not None))
                 return result2
 
             snapshot(page, "execution1_date_slot_failed")
@@ -242,26 +241,26 @@ def run_execution_1(page, booking, ticket_count, data, selected_date=None):
                 )
                 return "BROWSER_RETRY"
 
-            hold_result = hold_for_manual_takeover(
-                page,
-                "Date/ticket/slot selection could not be completed safely. "
-                "Correct Screen 1 manually, then retry."
+            print(
+                "[READY] Screen 1 could not be completed. Browser/session remains OPEN. "
+                "Returning to the main trigger listener; click a date or choose 1/2."
             )
-            if hold_result in ("1", "2", "CLOSE"):
-                return hold_result
+            return "READY"
 
         except Exception as exc:
             print(f"\n[EXECUTION 1 ERROR] {type(exc).__name__}: {exc}")
             snapshot(page, "execution1_exception")
             save_auth_if_authenticated(page.context, page)
-            hold_result = hold_for_manual_takeover(
-                page,
-                f"Execution 1 exception: {type(exc).__name__}. Browser remains open."
+            if selected_date is not None:
+                print("[BROWSER] Screen 1 exception; returning to browser-date listening without closing the session.")
+                return "BROWSER_RETRY"
+            print(
+                "[READY] Execution 1 failed, but the browser/session remains OPEN. "
+                "Returning to the main trigger listener; click a date or choose 1/2."
             )
-            if hold_result in ("1", "2", "CLOSE"):
-                return hold_result
+            return "READY"
 
-def run_execution_2(page, data):
+def run_execution_2(page, data, browser_triggered=False):
     """Screen 2: populate the latest pilgrim/contact configuration, then Continue."""
     print("\n[EXECUTION 2] Screen 2: Pilgrim Details")
 
@@ -279,9 +278,11 @@ def run_execution_2(page, data):
             contact = data.get("contact", {})
             booking = data.get("booking", {})
             if not isinstance(pilgrims, list) or not pilgrims:
-                return hold_for_manual_takeover(
-                    page, "No pilgrim records were found in pilgrims.json."
+                print(
+                    "[READY] No pilgrim records were found in pilgrims.json. "
+                    "Browser/session remains OPEN; returning to the main trigger listener."
                 )
+                return "READY"
 
             unresolved = []
             print(f"[EXECUTION 2] Filling {len(pilgrims)} pilgrim(s).")
@@ -293,14 +294,11 @@ def run_execution_2(page, data):
                 print(f"[EXECUTION 2] {len(unresolved)} field(s) need manual attention.")
                 for item in unresolved:
                     print(f"[MANUAL] {item[0]} -> {item[2]}")
-                hold_result = hold_for_manual_takeover(
-                    page,
-                    "Some pilgrim/contact fields were not verified. "
-                    "Correct them manually, then retry Execution 2."
+                print(
+                    "[READY] Screen 2 field verification failed. Browser/session remains OPEN. "
+                    "Returning to the main trigger listener; you can click a date or choose 1/2."
                 )
-                if hold_result in ("1", "2", "CLOSE"):
-                    return hold_result
-                continue
+                return "READY"
 
             print("[EXECUTION 2] Pilgrim/contact details populated successfully.")
 
@@ -310,13 +308,11 @@ def run_execution_2(page, data):
             if not click_ttd_continue(page, 1, "Screen 2"):
                 print("[CONTINUE] Screen 2 Continue failed.")
                 snapshot(page, "screen2_continue_failed")
-                hold_result = hold_for_manual_takeover(
-                    page,
-                    "Screen 2 fields are populated, but Continue could not be clicked."
+                print(
+                    "[READY] Screen 2 Continue failed. Browser/session remains OPEN. "
+                    "Returning to the main trigger listener; you can click a date or choose 1/2."
                 )
-                if hold_result in ("1", "2", "CLOSE"):
-                    return hold_result
-                continue
+                return "READY"
 
             save_auth_if_authenticated(page.context, page)
             print("[OK] Screen 2 Continue clicked.")
@@ -328,12 +324,11 @@ def run_execution_2(page, data):
             print(f"\n[EXECUTION 2 ERROR] {type(exc).__name__}: {exc}")
             snapshot(page, "execution2_exception")
             save_auth_if_authenticated(page.context, page)
-            hold_result = hold_for_manual_takeover(
-                page,
-                f"Execution 2 exception: {type(exc).__name__}. Browser remains open."
+            print(
+                "[READY] Execution 2 failed, but the browser/session remains OPEN. "
+                "Returning to the main trigger listener; you can click a date or choose 1/2."
             )
-            if hold_result in ("1", "2", "CLOSE"):
-                return hold_result
+            return "READY"
 
 def main():
     data = load_data()
@@ -433,8 +428,11 @@ def main():
                     print("[CLOSE] Explicit CLOSE received.")
                     return
 
-                if result == "BROWSER_RETRY":
-                    print("[READY] Browser-date trigger remains active. Click another TTD date when ready.")
+                if result in ("BROWSER_RETRY", "READY"):
+                    print(
+                        "[READY] Browser-date trigger remains active. Browser/session remains OPEN. "
+                        "You may click any TTD date, or choose 1/2 from the backend."
+                    )
                     continue
 
                 print("\n[READY] Execution completed/paused. Browser remains OPEN.")
@@ -452,19 +450,42 @@ def main():
                     pass
                 save_auth_if_authenticated(context, page)
 
-                command = hold_browser(
-                    page,
-                    f"Unhandled exception: {type(exc).__name__}. Fix the page manually, then type ready to retry."
+                print(
+                    "[READY] An unexpected error occurred, but the browser/session is being kept OPEN. "
+                    "The trigger listener will remain available so you can click a date or choose 1/2."
                 )
-                if command == "CLOSE":
-                    return
-
-                print("[ready] Browser remains open. The current script execution has stopped.")
-                print("[ready] You can manually continue in the browser or restart the script.")
+                # Do not terminate the authenticated browser on an automation error.
+                # Re-enter the same trigger loop and let the user decide the next action.
                 while True:
-                    command = input("[HOLD] Type CLOSE to end the script: ").strip().upper()
-                    if command == "CLOSE":
-                        return
+                    try:
+                        if context is None or not context.pages:
+                            print("[ERROR] Browser context is no longer available; cannot preserve the session.")
+                            return
+                        page = context.pages[-1]
+                        mode, selected_date = wait_for_trigger(page)
+                        if mode == "CLOSE":
+                            print("[CLOSE] Explicit CLOSE received.")
+                            return
+                        data, data_signature, _ = load_latest_data(data, data_signature)
+                        booking = data.get("booking", {})
+                        ticket_count = screen1_ticket_count(page, data)
+                        if mode == "1":
+                            result = run_execution_1(page, booking, ticket_count, data)
+                        elif mode == "2":
+                            result = run_execution_2(page, data)
+                        else:
+                            result = run_execution_1(page, booking, ticket_count, data, selected_date=selected_date)
+                        if result == "CLOSE":
+                            return
+                        print("[READY] Browser/session remains OPEN. Returning to trigger listener.")
+                    except Exception as loop_exc:
+                        print(f"[ERROR] Recovery loop: {type(loop_exc).__name__}: {loop_exc}")
+                        if page is not None:
+                            try:
+                                save_auth_if_authenticated(context, page)
+                            except Exception:
+                                pass
+                        print("[READY] Recovery will continue without closing the browser/session.")
             else:
                 input("[HOLD] Browser was not fully initialized. Press ENTER to exit...")
 
