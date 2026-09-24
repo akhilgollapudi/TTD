@@ -175,21 +175,17 @@ def availability_count(text):
     return None
 
 def slot_priority(item, preferred="", evening_preferred=True, evening_start_minutes=16 * 60):
-    """
-    Rank an already-discovered live slot without any additional browser
-    interaction, waiting, polling, or network request.
+    """Rank slots with HIGHEST AVAILABILITY as the primary rule.
 
     Priority:
-      1. Prefer evening slots at/after evening_start_minutes when at least
-         one such slot is available.
-      2. Within the preferred evening window, highest numeric availability.
-      3. preferred_slot is a tie-breaker.
-      4. Earliest slot time is the final tie-breaker.
+      1. Highest numeric availability.
+      2. preferred_slot as a tie-breaker.
+      3. evening preference as a tie-breaker.
+      4. Earliest slot time as the final tie-breaker.
 
-    If no evening slot is available, the caller falls back to all available
-    slots and highest availability becomes the primary criterion.
-
-    Unknown numeric availability is ranked below known availability counts.
+    ``prefer_evening_slot`` no longer overrides a slot with higher
+    availability. This means a 4 PM slot with 77 available beats a 6 PM slot
+    with 60 available. Evening preference only helps when availability is tied.
     """
     count = item.get("availability_count")
     known = count is not None
@@ -202,44 +198,30 @@ def slot_priority(item, preferred="", evening_preferred=True, evening_start_minu
     preferred_match = bool(preferred and item.get("time") == preferred)
 
     return (
-        1 if is_evening else 0,
         1 if known else 0,
         count if known else -1,
         1 if preferred_match else 0,
+        1 if is_evening else 0,
         -(minutes if minutes is not None else 9999),
     )
 
+
 def choose_booking_slot(page, booking, ticket_count=None):
-    """
-    Select a live SED slot with an evening preference.
+    """Select the currently available slot with the highest availability.
 
-    Priority:
-      1. If any available slot is at/after evening_start_time, consider only
-         those evening slots.
-      2. Among those evening slots, choose the highest reported availability.
-      3. preferred_slot is a tie-breaker.
-      4. Earliest evening slot is the final tie-breaker.
-      5. If no evening slot is available, fall back immediately to all
-         available slots and choose the highest reported availability.
-
-    The evening preference is applied entirely to the already-scanned slot
-    inventory, so it adds no page reload, polling, or artificial wait.
+    The entire visible inventory is scanned once. No date changes, reloads,
+    or repeated slot searches are performed after a candidate is selected.
     """
     preferred = normalize_time_text(booking.get("preferred_slot", ""))
 
-    # Default: 4:00 PM local TTD time. Can be overridden in pilgrims.json
-    # with booking.evening_start_time, e.g. "17:00".
     evening_start_text = normalize_time_text(
-        booking.get("evening_start_time", "4:00 PM")
+        booking.get("evening_start_time", "6:00 PM")
     )
     evening_start_minutes = parse_slot_time(evening_start_text)
     if evening_start_minutes is None:
-        evening_start_minutes = 16 * 60
-        evening_start_text = "04:00 pm"
+        evening_start_minutes = 18 * 60
 
-    evening_preferred = bool(
-        booking.get("prefer_evening_slot", True)
-    )
+    evening_preferred = bool(booking.get("prefer_evening_slot", True))
 
     slots = slot_card_candidates(page)
 
@@ -248,15 +230,13 @@ def choose_booking_slot(page, booking, ticket_count=None):
         snapshot(page, "slot_cards_not_detected")
         return False, None
 
-    # For older/named Seva cards, TTD explicitly exposes the supported person
-    # count (for example "1 Person" or "2 Persons"). Do not select a Seva
-    # that cannot accommodate the configured pilgrim count. Standard
-    # "Slot Time ..." cards do not use this capacity rule.
     requested_tickets = int(ticket_count or 0)
     available = []
+
     for item in slots:
         if not item["available"]:
             continue
+
         if (
             requested_tickets > 0
             and item.get("named_seva")
@@ -268,6 +248,7 @@ def choose_booking_slot(page, booking, ticket_count=None):
                 f"{item['capacity']} < tickets {requested_tickets}"
             )
             continue
+
         available.append(item)
 
     debug("[SLOT] Live slot inventory:")
@@ -286,49 +267,21 @@ def choose_booking_slot(page, booking, ticket_count=None):
         snapshot(page, "no_available_slot")
         return False, None
 
-    # Prefer evening slots only if at least one evening slot is currently
-    # available. This is a local in-memory filter over the inventory already
-    # collected above, so there is no extra browser/network latency.
-    evening_available = [
-        item for item in available
-        if (
-            evening_preferred
-            and item.get("minutes") is not None
-            and item["minutes"] >= evening_start_minutes
-        )
-    ]
-
-    if evening_available:
-        candidates = evening_available
-        debug(
-            f"[SLOT] Evening preference active: selecting from slots "
-            f">= {evening_start_text}."
-        )
-    else:
-        candidates = available
-        if evening_preferred:
-            debug(
-                f"[SLOT] No available slot >= {evening_start_text}; "
-                "falling back to all available slots."
-            )
-
     ranked = sorted(
-        candidates,
+        available,
         key=lambda item: slot_priority(
             item,
             preferred,
-            evening_preferred=bool(evening_available),
+            evening_preferred=evening_preferred,
             evening_start_minutes=evening_start_minutes,
         ),
         reverse=True,
     )
 
     selected = ranked[0]
-    debug(
-        f"[SLOT] Selected candidate: {selected['time']} | "
-        f"availability_count={selected.get('availability_count')} | "
-        f"evening={selected.get('minutes') is not None and selected['minutes'] >= evening_start_minutes} | "
-        f"preferred={selected['time'] == preferred}"
+    print(
+        f"[SLOT] Highest availability: {selected.get('availability_count')} "
+        f"at {selected['time']}"
     )
 
     if click_slot(page, selected):
@@ -407,7 +360,7 @@ def click_ttd_continue(page, count=1, stage=""):
 
     return True
 
-def select_date_and_slot(page, booking, ticket_count):
+def select_date_and_slot(page, booking, ticket_count, selected_date=None):
     """
     Screen 1 flow:
       1. Select requested/fallback date.
@@ -415,13 +368,19 @@ def select_date_and_slot(page, booking, ticket_count):
       3. Set Number of Tickets = total pilgrims.
       4. Click Continue once to move to Screen 2.
     """
-    if not booking.get("target_date"):
-        print("[DATE] booking.target_date is not configured; manual selection required.")
-        return False
+    if selected_date is None:
+        if not booking.get("target_date"):
+            print("[DATE] booking.target_date is not configured; manual selection required.")
+            return False
 
-    ok, selected_date = choose_booking_date(page, booking)
-    if not ok:
-        return False
+        ok, selected_date = choose_booking_date(page, booking)
+        if not ok:
+            return False
+    else:
+        print(
+            f"[DATE] Using browser-selected date: "
+            f"{selected_date.strftime('%d/%m/%Y')}"
+        )
 
     # Some TTD Screen-1 variants expose Number of Tickets; the supplied
     # actual variant does not. Set it when present, but do not fail merely

@@ -1,11 +1,8 @@
-# TTD Booking Assistant v19
+# TTD Booking Assistant v24
 
-## Important regression fix
-v19 restores the missing `total_pilgrim_count` import in `runtime.py`. This was the cause of:
-
-`NameError: name 'total_pilgrim_count' is not defined`
-
-The function remains in `tickets.py` and is imported by `runtime.py` for both direct and package execution.
+## Full update
+This package preserves the modular v23 booking assistant and includes the latest
+calendar/date-search update plus the Screen-1/Screen-2 JSON refresh fixes.
 
 ## Execution menu
 After authentication/session preparation, the program shows:
@@ -14,7 +11,38 @@ After authentication/session preparation, the program shows:
 2. Populate Screen 2 ONLY: Pilgrim Details
 CLOSE = Exit
 
-Screen 1 and Screen 2 remain independently runnable. The browser/session remains open until CLOSE is explicitly selected.
+Screen 1 and Screen 2 remain independently runnable. The browser/session remains
+open until CLOSE is explicitly selected.
+
+## Date selection update
+- The configured `target_date` is attempted first.
+- The calendar month is exposed by scrolling the TTD calendar carousel when the
+  target month is not initially visible.
+- `date_fallback: NEXT_AVAILABLE` selects a selectable date strictly after the
+  target date.
+- `date_search_direction: FORWARD` or `BOTH` can extend the search across
+  additional calendar months. Default is `BOTH`.
+- `date_search_months` controls the maximum month-navigation attempts. Default is 8.
+- A successful execution selects exactly one date; it does not bounce between dates.
+
+## Slot selection update
+- The live slot inventory is scanned once for the selected date.
+- Highest numeric availability is the primary selection rule.
+- `preferred_slot` and `prefer_evening_slot` are tie-breakers only.
+- No extra date changes or repeated slot searches are performed after selection.
+
+## Gothram / Homam
+For **Sri Srinivasa Divyaanugraha Homam**:
+- Screen 1 ticket count comes from `booking.tickets` (normally 1).
+- Screen 2 may still contain multiple pilgrim entries.
+- `booking.gothram` is filled for this seva only.
+- Other sevas keep the existing behavior: Screen 1 ticket count is based on the
+  number of pilgrims and Gothram is ignored.
+
+## JSON refresh
+`pilgrims.json` can be edited while the browser remains open. The latest valid
+configuration is loaded before Screen 1/Screen 2 execution and before the automatic
+Screen-1 -> Screen-2 transition.
 
 ## Run directly
 ```bash
@@ -30,15 +58,13 @@ python -m TTD
 ```
 
 ## Preserved behavior
-- Existing authentication/persistent Chromium profile
+- Persistent Chromium profile/session
 - Manual OTP/CAPTCHA handling
 - Independent Screen 1 / Screen 2 execution
-- Date selection and forward-only NEXT_AVAILABLE fallback
-- Actual TTD calendar variants including last visible month
 - Number of Tickets
-- Slot detection and selection across supported DOM variants
-- Evening preference / availability ranking
-- Pilgrim fields
+- TTD calendar variants including last visible month
+- Slot detection and availability parsing
+- Pilgrim fields and contact/general details
 - Email (`emailId` supported)
 - City / State / Country / Pincode
 - Gender / Photo ID dropdowns
@@ -46,34 +72,11 @@ python -m TTD
 - Manual takeover / READY / CLOSE behavior
 - Runtime diagnostics/screenshots
 
-## Regression verification
-The package was compile/import tested and verified to expose:
-- `total_pilgrim_count`
-- `wait_for_execution_mode`
-- `run_execution_1`
-- `run_execution_2`
+## Verification
+All Python modules in this package were compile-tested with Python 3.
+The package was not live-tested against the TTD website in this build step.
 
-The v15 baseline contained 55 top-level functions; v19 retains all 55 after modularization.
-
-## v20 regression fix
-
-This release preserves the v19 Screen 1 / Screen 2 independent execution menu and
-fixes the TTD live calendar regression observed on 25-Sep-2026:
-- `rgb(255, 191, 0)` (TTD "Filling Fast") is selectable.
-- NEXT_AVAILABLE keeps the earlier working behavior of selecting the earliest
-  currently selectable date exposed by TTD, rather than requiring it to be after
-  the configured target date.
-- No existing Screen 1/Screen 2 menu, persistent browser behavior, OTP/CAPTCHA
-  manual handling, or form-filling modules are removed.
-
-## v23 terminal output
-
-Terminal output is concise by default: successful stage changes, configuration refreshes, manual-action requirements, and errors are shown. Detailed DOM/debug output is disabled by default.
-
-For troubleshooting only, run:
-
+For troubleshooting only:
 ```bash
 TTD_VERBOSE=1 python main.py
 ```
-
-`pilgrims.json` is checked immediately before each Screen 1/Screen 2 execution and again after menu input, so the latest pilgrim list and booking settings are used without restarting the browser.

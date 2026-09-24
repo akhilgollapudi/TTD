@@ -1,4 +1,4 @@
-"""Allow: python -m ttd_booking_assistant_v16"""
+"""Allow: python -m ttd_booking_assistant_v24"""
 
 from .runtime import main
 

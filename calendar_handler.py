@@ -187,6 +187,109 @@ def calendar_date_candidates(page):
         )
     return result
 
+
+def _calendar_scroll_state(page):
+    """Return the horizontal scroll container used by the TTD month carousel."""
+    try:
+        return page.evaluate("""
+        () => {
+            const months = Array.from(document.querySelectorAll(
+                '[class*=\"DesktopCalender_month__\"], [class*=\"DesktopCalender_lastmonth__\"]'
+            )).filter(e => {
+                const r = e.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            });
+            if (!months.length) return null;
+
+            let el = months[0].parentElement;
+            while (el && el !== document.body) {
+                const style = getComputedStyle(el);
+                const scrollable = el.scrollWidth > el.clientWidth + 8;
+                if (scrollable && (style.overflowX === 'auto' || style.overflowX === 'scroll' || style.overflow === 'auto' || style.overflow === 'scroll')) {
+                    return {scrollLeft: el.scrollLeft, clientWidth: el.clientWidth, scrollWidth: el.scrollWidth};
+                }
+                el = el.parentElement;
+            }
+            return null;
+        }
+        """)
+    except Exception:
+        return None
+
+
+def _scroll_calendar(page, direction):
+    """Move the TTD calendar carousel one viewport left/right."""
+    delta_sign = 1 if direction == "forward" else -1
+    try:
+        moved = page.evaluate("""
+        (sign) => {
+            const months = Array.from(document.querySelectorAll(
+                '[class*=\"DesktopCalender_month__\"], [class*=\"DesktopCalender_lastmonth__\"]'
+            )).filter(e => {
+                const r = e.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            });
+            if (!months.length) return false;
+
+            let el = months[0].parentElement;
+            while (el && el !== document.body) {
+                const style = getComputedStyle(el);
+                if (el.scrollWidth > el.clientWidth + 8 &&
+                    (style.overflowX === 'auto' || style.overflowX === 'scroll' || style.overflow === 'auto' || style.overflow === 'scroll')) {
+                    const before = el.scrollLeft;
+                    const amount = Math.max(300, Math.floor(el.clientWidth * 0.8));
+                    el.scrollLeft = Math.max(0, Math.min(el.scrollWidth, before + sign * amount));
+                    el.dispatchEvent(new Event('scroll', {bubbles:true}));
+                    return el.scrollLeft !== before;
+                }
+                el = el.parentElement;
+            }
+            return false;
+        }
+        """, delta_sign)
+        if moved:
+            page.wait_for_timeout(350)
+        return bool(moved)
+    except Exception as exc:
+        debug(f"[DEBUG] Calendar horizontal scroll failed: {type(exc).__name__}: {exc}")
+        return False
+
+
+def _calendar_visible_months(page):
+    months = []
+    for item in calendar_date_candidates(page):
+        first = item["date"].replace(day=1)
+        if first not in months:
+            months.append(first)
+    return sorted(months)
+
+
+def _bring_target_month_into_view(page, target, max_moves=8):
+    """Expose the target month without clicking any date."""
+    target_month = target.replace(day=1)
+
+    for _ in range(max_moves + 1):
+        visible = _calendar_visible_months(page)
+        if not visible:
+            return False
+
+        if target_month in visible:
+            return True
+
+        first_month = min(visible)
+        last_month = max(visible)
+
+        if target_month > last_month:
+            if not _scroll_calendar(page, "forward"):
+                break
+        elif target_month < first_month:
+            if not _scroll_calendar(page, "backward"):
+                break
+        else:
+            return True
+
+    return target_month in _calendar_visible_months(page)
+
 def selected_date_signal(page, target):
     """Check the TTD page text for the selected calendar date."""
     wanted_variants = {
@@ -200,58 +303,44 @@ def selected_date_signal(page, target):
     return any(norm(v) and norm(v) in normalized_body for v in wanted_variants)
 
 def click_calendar_date(page, candidate):
-    """Click a live TTD calendar cell and wait for the SPA to react.
+    """Click exactly one TTD calendar date without bouncing between dates.
 
-    TTD can take longer than a few hundred milliseconds to rebuild the slot
-    section after a date click. The earlier working version waited 600 ms;
-    keep that baseline and add a short bounded reaction window. No reload or
-    navigation is performed.
+    The previous implementation treated the presence of the slot section as a
+    successful date reaction. That section is often already present, so a
+    click on one date could be reported as successful before TTD had actually
+    applied the date. Combined with NEXT_AVAILABLE considering dates before
+    the target, this could produce sequences such as 26 -> 27 -> 26.
+
+    This version:
+      * clicks only the supplied candidate;
+      * never uses the pre-existing slot section as a success signal;
+      * accepts an explicit selected/active DOM state when TTD exposes one;
+      * otherwise treats the successful click dispatch as the result, because
+        some TTD DOM variants do not expose a selected state.
     """
     td = candidate["locator"]
-    before_url = page.url
-    before_body = body_text(page)
 
-    def selection_signal():
+    def selection_state():
         try:
-            return bool(td.evaluate("""
-                e => {
-                    const cls = String(e.className || '').toLowerCase();
-                    return e.getAttribute('aria-selected') === 'true' ||
-                           e.getAttribute('data-selected') === 'true' ||
-                           e.getAttribute('data-active') === 'true' ||
-                           /selected|active|current/.test(cls);
-                }
-            """))
+            return td.evaluate("""
+                e => ({
+                    aria: e.getAttribute('aria-selected'),
+                    dataSelected: e.getAttribute('data-selected'),
+                    dataActive: e.getAttribute('data-active'),
+                    className: String(e.className || ''),
+                    style: e.getAttribute('style') || '',
+                    background: getComputedStyle(e).backgroundColor
+                })
+            """)
         except Exception:
-            return False
+            return None
 
-    def slot_area_signal():
-        try:
-            return page.locator(
-                '#scrollSlotType:visible, '
-                '[class*="SlotBooking_availableSlotSection"]:visible, '
-                '[class*="SlotBooking_selectedavailableSlotSection"]:visible, '
-                'input[type="radio"]:visible, [role="radio"]:visible'
-            ).count() > 0
-        except Exception:
-            return False
-
-    def reacted():
-        try:
-            if page.url != before_url:
-                return True
-        except Exception:
-            pass
-        try:
-            if body_text(page) != before_body:
-                return True
-        except Exception:
-            pass
-        return selection_signal() or slot_area_signal()
+    before = selection_state()
 
     try:
         td.scroll_into_view_if_needed()
         td.click(force=True, timeout=1500)
+        page.wait_for_timeout(600)
     except Exception as exc:
         debug(
             f"[DEBUG] Calendar <td> click failed for {candidate['id']}: "
@@ -260,6 +349,7 @@ def click_calendar_date(page, candidate):
         try:
             child = td.locator("div").first
             child.click(force=True, timeout=1500)
+            page.wait_for_timeout(600)
         except Exception as exc2:
             debug(
                 f"[DEBUG] Calendar child click also failed for {candidate['id']}: "
@@ -267,30 +357,29 @@ def click_calendar_date(page, candidate):
             )
             return False
 
-    # Give the TTD SPA a bounded reaction window. This is intentionally not
-    # a polling/reload loop; it only waits on the already-open page.
-    for _ in range(8):
-        page.wait_for_timeout(300)
-        if reacted():
-            debug(f"[DEBUG] Calendar selection reacted for {candidate['id']}.")
+    after = selection_state()
+
+    # Prefer an explicit TTD selected/active state when it is available.
+    if after:
+        class_name = str(after.get("className") or "").lower()
+        if (
+            after.get("aria") == "true"
+            or after.get("dataSelected") == "true"
+            or after.get("dataActive") == "true"
+            or re.search(r"selected|active|current", class_name)
+        ):
+            debug(f"[DATE] TTD marked {candidate['id']} as selected/active.")
             return True
 
-    # Final DOM click fallback, matching the older working behavior.
-    try:
-        td.evaluate("(e) => e.click()")
-        for _ in range(6):
-            page.wait_for_timeout(300)
-            if reacted():
-                debug(f"[DEBUG] Calendar DOM click reacted for {candidate['id']}.")
-                return True
-    except Exception as exc:
-        debug(
-            f"[DEBUG] Calendar DOM click fallback failed for {candidate['id']}: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    debug(f"[DEBUG] Calendar click produced no verified UI reaction for {candidate['id']}.")
-    return False
+    # Some current TTD variants do not expose selected state at all. If the
+    # Playwright click succeeded, do not click another date trying to verify it.
+    if before != after:
+        debug(f"[DATE] Calendar state changed for {candidate['id']}.")
+    print(
+        f"[DATE] Click dispatched for {candidate['date'].strftime('%d/%m/%Y')}; "
+        "TTD did not expose an explicit selected state."
+    )
+    return True
 
 def wait_for_target_date(page, target, timeout_minutes):
     """Wait for the exact target date to become selectable without reloading."""
@@ -329,16 +418,26 @@ def wait_for_target_date(page, target, timeout_minutes):
     return None
 
 def choose_booking_date(page, booking):
-    """
-    Select target_date or, with NEXT_AVAILABLE, the earliest selectable date
-    strictly after the requested date in the live calendar.
+    """Select one date, searching calendar months before giving up.
 
-    Never selects an earlier date.
+    Priority:
+      1. Exact target date.
+      2. NEXT_AVAILABLE future date.
+      3. If configured, search both directions for a selectable date.
+
+    The function never clicks two dates as part of one successful selection.
+    It first exposes the relevant month, then selects exactly one date.
     """
     target = parse_target_date(booking.get("target_date"))
     date_fallback = norm(booking.get("date_fallback", "NONE")).upper()
+    search_direction = norm(booking.get("date_search_direction", "BOTH")).upper()
+    max_month_moves = max(1, int(booking.get("date_search_months", 8) or 8))
 
     print(f"[DATE] Requested target date: {target.strftime('%d/%m/%Y')}")
+
+    # First expose the requested month. This fixes the case where TTD initially
+    # shows Aug-Nov while the configured target is in December.
+    _bring_target_month_into_view(page, target, max_month_moves)
 
     candidates = calendar_date_candidates(page)
     if not candidates:
@@ -351,49 +450,143 @@ def choose_booking_date(page, booking):
         by_date.setdefault(item["date"], item)
 
     requested = by_date.get(target)
+    if requested and requested["selectable"]:
+        if click_calendar_date(page, requested):
+            print(f"[OK] Selected target date: {target.strftime('%d/%m/%Y')}")
+            return True, target
+
     if requested:
         debug(
-            f"[DATE] Target {requested['id']}: "
-            f"cursor={requested['cursor']}, "
-            f"pointer-events={requested['pointer_events']}, "
+            f"[DATE] Target {requested['id']} unavailable: "
+            f"cursor={requested['cursor']}, pointer-events={requested['pointer_events']}, "
             f"bg={requested['background']}"
         )
-        if requested["selectable"]:
-            if click_calendar_date(page, requested):
-                print(f"[OK] Selected target date: {target.strftime('%d/%m/%Y')}")
-                return True, target
-            debug("[DATE] Target date looked selectable but click verification failed.")
-        else:
-            debug("[DATE] Target date is not selectable in the live UI.")
     else:
-        debug("[DATE] Target date is not exposed by the currently visible calendar.")
+        debug("[DATE] Target date is not currently exposed after month navigation.")
 
     if date_fallback != "NEXT_AVAILABLE":
         return False, None
 
-    # Preserve the earlier working behavior: NEXT_AVAILABLE means the
-    # earliest date currently exposed by TTD as selectable. It is not
-    # restricted to dates after the requested target. This matters when an
-    # earlier date is already released while the requested date is not.
-    available = [
-        item for item in by_date.values()
-        if item["selectable"]
-    ]
-    available.sort(key=lambda x: x["date"])
-
-    if available:
-        debug(
-            "[DATE] NEXT_AVAILABLE candidates: "
-            + ", ".join(item["date"].strftime("%d/%m/%Y") for item in available)
-        )
-
-    for item in available:
-        debug(f"[DATE] Trying next available date: {item['date'].strftime('%d/%m/%Y')}")
+    # Prefer a future date first. Do not select a date before target while a
+    # future candidate is visible.
+    future = sorted(
+        (item for item in by_date.values() if item["date"] > target and item["selectable"]),
+        key=lambda x: x["date"]
+    )
+    if future:
+        item = future[0]
         if click_calendar_date(page, item):
             print(f"[OK] Selected NEXT_AVAILABLE date: {item['date'].strftime('%d/%m/%Y')}")
             return True, item["date"]
 
-    print("[DATE] No selectable date after the requested date was safely found.")
+    # If the requested month has no future selectable date, optionally search
+    # additional months forward. This is still date-only discovery; no date is
+    # clicked until the final candidate is chosen.
+    if search_direction in ("FORWARD", "BOTH"):
+        for _ in range(max_month_moves):
+            if not _scroll_calendar(page, "forward"):
+                break
+            candidates = calendar_date_candidates(page)
+            future = sorted(
+                (item for item in candidates if item["date"] > target and item["selectable"]),
+                key=lambda x: x["date"]
+            )
+            if future:
+                item = future[0]
+                if click_calendar_date(page, item):
+                    print(f"[OK] Selected NEXT_AVAILABLE date: {item['date'].strftime('%d/%m/%Y')}")
+                    return True, item["date"]
+
+    # BOTH is useful when TTD has no released future quota but an earlier date
+    # is already bookable. This is opt-in through the default BOTH behavior.
+    if search_direction == "BOTH":
+        # Return the carousel to the target month before looking backward.
+        _bring_target_month_into_view(page, target, max_month_moves)
+        candidates = calendar_date_candidates(page)
+        past = sorted(
+            (item for item in candidates if item["date"] < target and item["selectable"]),
+            key=lambda x: x["date"],
+            reverse=True
+        )
+        if past:
+            item = past[0]
+            if click_calendar_date(page, item):
+                print(f"[OK] Selected nearby available date: {item['date'].strftime('%d/%m/%Y')}")
+                return True, item["date"]
+
+    print(
+        "[DATE] Target date is unavailable and no selectable fallback date "
+        "was exposed after searching the calendar months."
+    )
     snapshot(page, "date_selection_failed")
     return False, None
 
+
+
+def install_browser_date_listener(page):
+    """Install a lightweight browser-side listener for user date clicks.
+
+    The listener only records a click on a TTD calendar date cell. It does not
+    select a date itself; Python consumes the event and starts the normal
+    Screen-1 flow using the date the user clicked.
+    """
+    page.evaluate("""() => {
+        if (window.__ttdBrowserDateListenerInstalled) return;
+
+        window.__ttdBrowserDateClick = null;
+        window.__ttdBrowserDateListenerInstalled = true;
+
+        document.addEventListener('click', (event) => {
+            const td = event.target.closest('td[id]');
+            if (!td) return;
+
+            const id = (td.id || '').trim();
+            if (!/^\\d{1,2}\\/\\d{1,2}$/.test(id)) return;
+
+            const calendar = td.closest(
+                '[class*="DesktopCalender_month__"], [class*="DesktopCalender_lastmonth__"]'
+            );
+            if (!calendar) return;
+
+            window.__ttdBrowserDateClick = {
+                id: id,
+                text: (td.innerText || '').trim(),
+                at: Date.now()
+            };
+        }, true);
+    }""")
+    debug("[BROWSER] Date-click listener installed.")
+
+def clear_browser_date_click(page):
+    """Clear the pending browser date-click event."""
+    try:
+        page.evaluate("() => { window.__ttdBrowserDateClick = null; }")
+    except Exception:
+        pass
+
+def get_browser_date_click(page):
+    """Consume the latest user calendar click and resolve it to a real date."""
+    try:
+        event = page.evaluate("""() => {
+            const e = window.__ttdBrowserDateClick || null;
+            window.__ttdBrowserDateClick = null;
+            return e;
+        }""")
+    except Exception:
+        return None
+
+    if not event or not event.get("id"):
+        return None
+
+    clicked_id = event["id"]
+    candidates = calendar_date_candidates(page)
+    for item in candidates:
+        if item.get("id") == clicked_id:
+            print(
+                f"[BROWSER] Date selected in browser: "
+                f"{item['date'].strftime('%d/%m/%Y')}"
+            )
+            return item["date"]
+
+    debug(f"[BROWSER] Clicked calendar cell {clicked_id}, but date could not be resolved.")
+    return None
