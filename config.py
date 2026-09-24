@@ -9,6 +9,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 TTD_URL = "https://ttdevasthanams.ap.gov.in/home/dashboard"
+
+# Seva-specific behavior observed on TTD Screen 2. This seva uses one
+# booking ticket while still allowing multiple pilgrim rows on the details form.
+GOTHRAM_SEVA_NAME = "Sri Srinivasa Divyaanugraha Homam"
+GOTHRAM_FIELD_LABEL = "Gothram"
 BROWSER_PROFILE_DIR = Path.home() / "ttd_browser_profile"
 TTD_AUTH_STATE_FILE = BROWSER_PROFILE_DIR / "ttd_auth_state.json"
 _PACKAGE_DATA_FILE = Path(__file__).resolve().parent / "pilgrims.json"

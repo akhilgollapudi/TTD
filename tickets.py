@@ -3,12 +3,12 @@ import time
 
 if __package__:
     from .config import *
-    from .utils import norm, matches, body_text, snapshot
+    from .utils import norm, matches, body_text, snapshot, is_gothram_seva
     from .slots import slot_card_candidates, click_slot
     from .calendar_handler import choose_booking_date, normalize_time_text, parse_slot_time
 else:
     from config import *
-    from utils import norm, matches, body_text, snapshot
+    from utils import norm, matches, body_text, snapshot, is_gothram_seva
     from slots import slot_card_candidates, click_slot
     from calendar_handler import choose_booking_date, normalize_time_text, parse_slot_time
 
@@ -28,6 +28,24 @@ def total_pilgrim_count(data):
             return len(value)
 
     return 0
+
+def screen1_ticket_count(page, data):
+    """Return the ticket count required by the currently selected seva.
+
+    Normal SED behavior remains one ticket per configured pilgrim. The
+    Srinivasa Divyaanugraha Homam form is different: the Screen-1 booking
+    ticket count is fixed from booking.tickets (normally 1), while Screen 2
+    may contain multiple pilgrim rows.
+    """
+    if is_gothram_seva(page):
+        booking = data.get("booking", {}) if isinstance(data, dict) else {}
+        configured = booking.get("tickets", 1)
+        try:
+            count = int(configured)
+        except (TypeError, ValueError):
+            count = 1
+        return max(1, count)
+    return total_pilgrim_count(data)
 
 def set_ttd_ticket_count(page, ticket_count, required=False):
     """Set Number of Tickets when this Screen-1 variant exposes the field.
