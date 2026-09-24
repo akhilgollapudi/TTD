@@ -207,10 +207,11 @@ def slot_priority(item, preferred="", evening_preferred=True, evening_start_minu
 
 
 def choose_booking_slot(page, booking, ticket_count=None):
-    """Select the currently available slot with the highest availability.
+    """Select the correct live slot for the current seva.
 
-    The entire visible inventory is scanned once. No date changes, reloads,
-    or repeated slot searches are performed after a candidate is selected.
+    Generic sevas keep the existing highest-availability ranking.
+    Divyaanugraha is intentionally different: the form shown by TTD has one
+    Homam option at 09:00 AM, so only that named card is eligible.
     """
     preferred = normalize_time_text(booking.get("preferred_slot", ""))
 
@@ -231,10 +232,33 @@ def choose_booking_slot(page, booking, ticket_count=None):
         return False, None
 
     requested_tickets = int(ticket_count or 0)
+    divyanugraha = is_gothram_seva(page)
     available = []
 
     for item in slots:
         if not item["available"]:
+            continue
+
+        if divyanugraha:
+            # Screenshot-confirmed Divyaanugraha Screen 1 rule:
+            #   - exactly one seva card
+            #   - Sri Srinivasa Divyaanugraha Homam
+            #   - 09:00 AM
+            #   - 2 Persons / ₹1600
+            text = norm(item.get("text", ""))
+            is_divya_card = (
+                "divyaanugraha homam" in text
+                or "divyanugraha homam" in text
+            )
+            if not is_divya_card:
+                continue
+            if item.get("minutes") != 9 * 60:
+                continue
+            if item.get("capacity") is not None and item["capacity"] != 2:
+                continue
+            if "1600" not in text:
+                debug("[SLOT] Divyaanugraha card did not expose ₹1600 text; continuing because service/time/capacity match.")
+            available.append(item)
             continue
 
         if (
@@ -267,25 +291,37 @@ def choose_booking_slot(page, booking, ticket_count=None):
         snapshot(page, "no_available_slot")
         return False, None
 
-    ranked = sorted(
-        available,
-        key=lambda item: slot_priority(
-            item,
-            preferred,
-            evening_preferred=evening_preferred,
-            evening_start_minutes=evening_start_minutes,
-        ),
-        reverse=True,
-    )
+    if divyanugraha:
+        # There is only one valid Divyaanugraha slot. Do not rank by
+        # availability and do not consider any other time.
+        selected = available[0]
+        print(
+            f"[SLOT] Divyaanugraha fixed slot: {selected['time']} | "
+            f"availability={selected.get('availability_count')}"
+        )
+    else:
+        ranked = sorted(
+            available,
+            key=lambda item: slot_priority(
+                item,
+                preferred,
+                evening_preferred=evening_preferred,
+                evening_start_minutes=evening_start_minutes,
+            ),
+            reverse=True,
+        )
 
-    selected = ranked[0]
-    print(
-        f"[SLOT] Highest availability: {selected.get('availability_count')} "
-        f"at {selected['time']}"
-    )
+        selected = ranked[0]
+        print(
+            f"[SLOT] Highest availability: {selected.get('availability_count')} "
+            f"at {selected['time']}"
+        )
 
     if click_slot(page, selected):
-        print(f"[OK] Selected SED slot: {selected['time']}")
+        if divyanugraha:
+            print(f"[OK] Selected Divyaanugraha Homam: {selected['time']}")
+        else:
+            print(f"[OK] Selected SED slot: {selected['time']}")
         return True, selected
 
     print("[SLOT] Selected slot click failed; failing fast.")
@@ -364,9 +400,10 @@ def select_date_and_slot(page, booking, ticket_count, selected_date=None):
     """
     Screen 1 flow:
       1. Select requested/fallback date.
-      2. Load the slot inventory and select a genuinely available slot.
-      3. Set Number of Tickets = total pilgrims.
-      4. Click Continue once to move to Screen 2.
+      2. For Divyaanugraha, leave Number of Tickets at the disabled/fixed 01.
+      3. Select only the 09:00 AM Divyaanugraha Homam card.
+      4. For other sevas, preserve the existing ticket/slot rules.
+      5. Click Continue once to move to Screen 2.
     """
     if selected_date is None:
         if not booking.get("target_date"):
@@ -382,13 +419,18 @@ def select_date_and_slot(page, booking, ticket_count, selected_date=None):
             f"{selected_date.strftime('%d/%m/%Y')}"
         )
 
-    # Some TTD Screen-1 variants expose Number of Tickets; the supplied
-    # actual variant does not. Set it when present, but do not fail merely
-    # because this newer form omits the field.
-    debug(f"[TICKETS] Total pilgrims in config: {ticket_count}")
-    if not set_ttd_ticket_count(page, ticket_count, required=False):
-        print("[TICKETS] Number of Tickets could not be set on this variant.")
-        return False
+    # Divyaanugraha is a fixed one-ticket form in the observed TTD UI.
+    # The Number of Tickets control is disabled/locked at 01, so NEVER click,
+    # type into, or validate that control for this seva. Other seva forms keep
+    # their existing ticket-count behavior.
+    if is_gothram_seva(page):
+        ticket_count = 1
+        print("[TICKETS] Divyaanugraha: Number of Tickets is fixed/disabled at 01; skipping ticket control.")
+    else:
+        debug(f"[TICKETS] Total pilgrims in config: {ticket_count}")
+        if not set_ttd_ticket_count(page, ticket_count, required=False):
+            print("[TICKETS] Number of Tickets could not be set on this variant.")
+            return False
 
     print(
         f"[SLOT] Checking available slots for "

@@ -10,8 +10,10 @@ from zoneinfo import ZoneInfo
 
 TTD_URL = "https://ttdevasthanams.ap.gov.in/home/dashboard"
 
-# Seva-specific behavior observed on TTD Screen 2. This seva uses one
-# booking ticket while still allowing multiple pilgrim rows on the details form.
+# Seva-specific behavior for Sri Srinivasa Divyaanugraha Homam. The observed
+# Screen-1 form fixes Number of Tickets at 01 and exposes one 09:00 AM Homam
+# card for 2 persons at ₹1600. Screen 2 therefore fills two persons for the
+# fixed ticket; other sevas retain their existing behavior.
 GOTHRAM_SEVA_NAME = "Sri Srinivasa Divyaanugraha Homam"
 GOTHRAM_FIELD_LABEL = "Gothram"
 BROWSER_PROFILE_DIR = Path.home() / "ttd_browser_profile"
