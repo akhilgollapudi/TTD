@@ -360,7 +360,7 @@ def click_ttd_continue(page, count=1, stage=""):
 
     return True
 
-def select_date_and_slot(page, booking, ticket_count):
+def select_date_and_slot(page, booking, ticket_count, selected_date=None):
     """
     Screen 1 flow:
       1. Select requested/fallback date.
@@ -368,13 +368,19 @@ def select_date_and_slot(page, booking, ticket_count):
       3. Set Number of Tickets = total pilgrims.
       4. Click Continue once to move to Screen 2.
     """
-    if not booking.get("target_date"):
-        print("[DATE] booking.target_date is not configured; manual selection required.")
-        return False
+    if selected_date is None:
+        if not booking.get("target_date"):
+            print("[DATE] booking.target_date is not configured; manual selection required.")
+            return False
 
-    ok, selected_date = choose_booking_date(page, booking)
-    if not ok:
-        return False
+        ok, selected_date = choose_booking_date(page, booking)
+        if not ok:
+            return False
+    else:
+        print(
+            f"[DATE] Using browser-selected date: "
+            f"{selected_date.strftime('%d/%m/%Y')}"
+        )
 
     # Some TTD Screen-1 variants expose Number of Tickets; the supplied
     # actual variant does not. Set it when present, but do not fail merely

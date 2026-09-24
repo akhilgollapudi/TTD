@@ -1,18 +1,21 @@
 from playwright.sync_api import sync_playwright
 
 import json
+import os
+import select
+import sys
 
 if __package__:
     from .config import *
     from .utils import load_data, load_latest_data, data_file_signature, snapshot, booking_in_progress
-    from .calendar_handler import choose_booking_date
+    from .calendar_handler import install_browser_date_listener, clear_browser_date_click, get_browser_date_click
     from .tickets import total_pilgrim_count, screen1_ticket_count, select_date_and_slot, click_ttd_continue
     from .forms import fill_pilgrims, fill_general
     from .auth import save_auth_if_authenticated, wait_for_auth_completion, ttd_login_screen
 else:
     from config import *
     from utils import load_data, load_latest_data, data_file_signature, snapshot, booking_in_progress
-    from calendar_handler import choose_booking_date
+    from calendar_handler import install_browser_date_listener, clear_browser_date_click, get_browser_date_click
     from tickets import total_pilgrim_count, screen1_ticket_count, select_date_and_slot, click_ttd_continue
     from forms import fill_pilgrims, fill_general
     from auth import save_auth_if_authenticated, wait_for_auth_completion, ttd_login_screen
@@ -51,20 +54,69 @@ def hold_browser(page, reason, allow_resume=False):
 
         print("[HOLD] Press ENTER, type READY, or type CLOSE.")
 
-def wait_for_execution_mode():
+def _stdin_ready(timeout=0.0):
+    """Return True when a console command is ready without blocking Playwright."""
+    if os.name == "nt":
+        try:
+            import msvcrt
+            return msvcrt.kbhit()
+        except Exception:
+            return False
+
+    try:
+        readable, _, _ = select.select([sys.stdin], [], [], timeout)
+        return bool(readable)
+    except (OSError, ValueError):
+        return False
+
+
+def _read_command_if_ready():
+    """Read one complete terminal command, if one is available."""
+    if not _stdin_ready(0):
+        return None
+
+    try:
+        command = sys.stdin.readline().strip().upper()
+    except Exception:
+        return None
+
+    return command or "READY"
+
+
+def wait_for_trigger(page):
+    """Wait for either backend command 1/2 or a date click in the browser.
+
+    This is deliberately non-blocking: Playwright keeps polling the page while
+    stdin is also checked, so either trigger can win.
+    """
+    install_browser_date_listener(page)
+    clear_browser_date_click(page)
+
+    print("\n" + "=" * 72)
+    print("[READY] Waiting for an execution trigger...")
+    print("  1 = Backend: run Screen 1 using booking.target_date")
+    print("  2 = Backend: run Screen 2 only")
+    print("  BROWSER = Click any TTD calendar date to start Screen 1 for that date")
+    print("  CLOSE = Exit")
+    print("[READY] You can leave this running and click a date when quota opens.")
+
     while True:
-        command = input(
-            "\nSelect execution mode (independent):\n"
-            "  1 = Populate Screen 1 ONLY: Date + Number of Tickets + Slot\n"
-            "  2 = Populate Screen 2 ONLY: Pilgrim Details\n"
-            "  CLOSE = Exit\n"
-            "Choice: "
-        ).strip().upper()
-        if command in ("1", "2"):
-            return command
-        if command == "CLOSE":
-            return "CLOSE"
-        print("[INFO] Enter 1, 2, or CLOSE.")
+        command = _read_command_if_ready()
+        if command in ("1", "2", "CLOSE"):
+            clear_browser_date_click(page)
+            return command, None
+
+        # A date click is captured in the browser and resolved against the
+        # current visible TTD calendar by Python.
+        selected_date = get_browser_date_click(page)
+        if selected_date is not None:
+            # Give the TTD click handler a short moment to finish updating the
+            # React UI before the slot inventory is inspected.
+            page.wait_for_timeout(400)
+            return "BROWSER", selected_date
+
+        page.wait_for_timeout(150)
+
 
 def hold_for_manual_takeover(page, reason):
     """Keep browser open; 1/2 can start either independent execution."""
@@ -118,7 +170,7 @@ def wait_for_screen2(page, timeout_seconds=15):
         page.wait_for_timeout(300)
     return False
 
-def run_execution_1(page, booking, ticket_count, data):
+def run_execution_1(page, booking, ticket_count, data, selected_date=None):
     """Screen 1 only: date + total ticket count + slot."""
     # Keep the JSON signature local to this execution. This is required for
     # the automatic Screen-1 -> Screen-2 transition, where pilgrims.json may
@@ -127,6 +179,11 @@ def run_execution_1(page, booking, ticket_count, data):
 
     print("\n[EXECUTION 1] Screen 1: Date + Tickets + Slot")
     print(f"[EXECUTION 1] Screen 1 ticket count: {ticket_count}")
+    if selected_date is not None:
+        print(
+            f"[EXECUTION 1] Trigger source: browser date click "
+            f"({selected_date.strftime('%d/%m/%Y')})"
+        )
 
     while True:
         try:
@@ -138,7 +195,7 @@ def run_execution_1(page, booking, ticket_count, data):
                 if hold_result in ("1", "2", "CLOSE"):
                     return hold_result
 
-            ok = select_date_and_slot(page, booking, ticket_count)
+            ok = select_date_and_slot(page, booking, ticket_count, selected_date=selected_date)
             if ok:
                 save_auth_if_authenticated(page.context, page)
                 print("[EXECUTION 1] Date, ticket count, and slot completed.")
@@ -170,6 +227,21 @@ def run_execution_1(page, booking, ticket_count, data):
                 return result2
 
             snapshot(page, "execution1_date_slot_failed")
+
+            # When Screen 1 was started by clicking a date in the browser, a
+            # selected date can legitimately have no compatible/live slot.
+            # Do NOT enter the blocking manual HOLD in that case: the user may
+            # simply click another calendar date, and the browser trigger must
+            # remain live. Returning to the main trigger loop reinstalls the
+            # listener and allows the next date click to start a fresh attempt.
+            if selected_date is not None:
+                print(
+                    "[BROWSER] No usable slot for the selected date. "
+                    "Returning to browser-date listening mode; click another "
+                    "date to retry."
+                )
+                return "BROWSER_RETRY"
+
             hold_result = hold_for_manual_takeover(
                 page,
                 "Date/ticket/slot selection could not be completed safely. "
@@ -312,40 +384,41 @@ def main():
             data, data_signature, _ = load_latest_data(data, data_signature)
 
             while True:
-                # IMPORTANT: always refresh configuration immediately before
-                # accepting an execution choice. If 5 pilgrims were configured
-                # and the user removes 3 because only 2 slots are available,
-                # selecting 1 or 2 now uses exactly those latest 2 records.
+                # Keep the browser event listener active while waiting. This
+                # allows either a terminal command or a real browser date click
+                # to trigger the same Screen-1 execution path.
+                if context.pages:
+                    page = context.pages[-1]
+
                 data, data_signature, changed = load_latest_data(data, data_signature)
                 booking = data.get("booking", {})
                 if changed:
                     print(f"[CONFIG] Latest pilgrim count: {total_pilgrim_count(data)}")
 
-                mode = wait_for_execution_mode()
+                mode, selected_date = wait_for_trigger(page)
                 if mode == "CLOSE":
                     print("[CLOSE] Explicit CLOSE received.")
                     return
 
-                # Use the currently visible/latest tab after manual navigation.
-                if context.pages:
-                    page = context.pages[-1]
-
-                # Check once more after the user answers 1/2. This closes the
-                # small race where pilgrims.json is edited while the menu prompt
-                # is waiting for input.
+                # Refresh once more immediately before execution so edits to
+                # pilgrims.json made while waiting are honored.
                 data, data_signature, _ = load_latest_data(data, data_signature)
                 booking = data.get("booking", {})
                 ticket_count = screen1_ticket_count(page, data)
 
                 if mode == "1":
                     result = run_execution_1(page, booking, ticket_count, data)
+                elif mode == "BROWSER":
+                    result = run_execution_1(
+                        page, booking, ticket_count, data, selected_date=selected_date
+                    )
                 else:
                     result = run_execution_2(page, data)
 
-                # 1 or 2 can be selected from ANY hold/error point.
+                # 1 or 2 can still be selected from ANY hold/error point.
+                # Browser-date triggers are accepted only while the main idle
+                # trigger loop is active, so there is no competing second flow.
                 while result in ("1", "2"):
-                    # A retry/alternate execution can happen after the user
-                    # edits pilgrims.json. Refresh again before re-entering.
                     data, data_signature, _ = load_latest_data(data, data_signature)
                     booking = data.get("booking", {})
                     if context.pages:
@@ -360,11 +433,11 @@ def main():
                     print("[CLOSE] Explicit CLOSE received.")
                     return
 
-                print("\n[MENU] Execution completed/paused.")
-                print("[MENU] Browser remains OPEN.")
-                print("[MENU] Choose 1 or 2 for the next independent execution.")
-                print("[MENU] You may manually move to either TTD screen.")
-                print("[MENU] Choose 1 or 2 again whenever you want.")
+                if result == "BROWSER_RETRY":
+                    print("[READY] Browser-date trigger remains active. Click another TTD date when ready.")
+                    continue
+
+                print("\n[READY] Execution completed/paused. Browser remains OPEN.")
 
         except Exception as exc:
             print("\n[ERROR] Automation stopped due to an exception:")

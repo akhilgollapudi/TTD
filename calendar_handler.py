@@ -521,3 +521,72 @@ def choose_booking_date(page, booking):
     snapshot(page, "date_selection_failed")
     return False, None
 
+
+
+def install_browser_date_listener(page):
+    """Install a lightweight browser-side listener for user date clicks.
+
+    The listener only records a click on a TTD calendar date cell. It does not
+    select a date itself; Python consumes the event and starts the normal
+    Screen-1 flow using the date the user clicked.
+    """
+    page.evaluate("""() => {
+        if (window.__ttdBrowserDateListenerInstalled) return;
+
+        window.__ttdBrowserDateClick = null;
+        window.__ttdBrowserDateListenerInstalled = true;
+
+        document.addEventListener('click', (event) => {
+            const td = event.target.closest('td[id]');
+            if (!td) return;
+
+            const id = (td.id || '').trim();
+            if (!/^\\d{1,2}\\/\\d{1,2}$/.test(id)) return;
+
+            const calendar = td.closest(
+                '[class*="DesktopCalender_month__"], [class*="DesktopCalender_lastmonth__"]'
+            );
+            if (!calendar) return;
+
+            window.__ttdBrowserDateClick = {
+                id: id,
+                text: (td.innerText || '').trim(),
+                at: Date.now()
+            };
+        }, true);
+    }""")
+    debug("[BROWSER] Date-click listener installed.")
+
+def clear_browser_date_click(page):
+    """Clear the pending browser date-click event."""
+    try:
+        page.evaluate("() => { window.__ttdBrowserDateClick = null; }")
+    except Exception:
+        pass
+
+def get_browser_date_click(page):
+    """Consume the latest user calendar click and resolve it to a real date."""
+    try:
+        event = page.evaluate("""() => {
+            const e = window.__ttdBrowserDateClick || null;
+            window.__ttdBrowserDateClick = null;
+            return e;
+        }""")
+    except Exception:
+        return None
+
+    if not event or not event.get("id"):
+        return None
+
+    clicked_id = event["id"]
+    candidates = calendar_date_candidates(page)
+    for item in candidates:
+        if item.get("id") == clicked_id:
+            print(
+                f"[BROWSER] Date selected in browser: "
+                f"{item['date'].strftime('%d/%m/%Y')}"
+            )
+            return item["date"]
+
+    debug(f"[BROWSER] Clicked calendar cell {clicked_id}, but date could not be resolved.")
+    return None
